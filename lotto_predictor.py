@@ -1,7 +1,7 @@
 """
 통합 로또 추천기 (Streamlit UI)
 - 버튼 클릭으로 최신 데이터 기반 10세트 추천
-- 유전 알고리즘 개선: 다양성 확보, 돌연변이 적용
+- 유전 알고리즘 개선: 10000개 개체 기반 최적화
 """
 import streamlit as st
 import numpy as np, random, itertools, time, re, requests, pandas as pd
@@ -136,21 +136,6 @@ def fitness_func(comb, probs):
     pat = gianella_pattern(comb, lotto_grid)
     return 0.7*eff + 0.3*(pat/50)
 
-# === 부모 선택 (점수 비례) ===
-def select_parents(scored, num_parents):
-    scores = np.array([s for _, s in scored])
-    candidates = [c for c,_ in scored]
-    
-    # 점수가 모두 0이면 균등 선택
-    if scores.sum() == 0:
-        probs = None
-    else:
-        probs = scores / scores.sum()
-    
-    # random.choices는 replace=True를 기본으로 하므로 충분히 선택 가능
-    parents = random.choices(candidates, weights=probs, k=num_parents)
-    return parents
-
 # === 돌연변이 적용 ===
 def mutate(child, mutation_rate=0.3):
     if random.random() < mutation_rate:
@@ -161,24 +146,35 @@ def mutate(child, mutation_rate=0.3):
         child[idx] = r
     return sorted(child)
 
-# === 유전 알고리즘식 조합 최적화 (개선) ===
-def evolve_combinations(base_probs, fitness_func, pop_size=100, generations=30):
-    pop = [sorted(random.sample(range(1,46),6)) for _ in range(pop_size)]
+# === 유전 알고리즘: 10000개 기반 최적화 ===
+def evolve_large_combinations(base_probs, fitness_func, total_combs=10000, generations=20, mutation_rate=0.3):
+    pop_set = set()
+    pop = []
+    while len(pop) < total_combs:
+        c = tuple(sorted(random.sample(range(1,46),6)))
+        if check_consecutive_rule(c) and c not in pop_set:
+            pop_set.add(c)
+            pop.append(list(c))
+    
     for _ in range(generations):
         scored = [(c, fitness_func(c, base_probs)) for c in pop]
         scored.sort(key=lambda x:x[1], reverse=True)
-        parents = select_parents(scored, pop_size//2)
+        parents = [c for c,_ in scored[:total_combs//2]]
+        child_set = set(tuple(c) for c in parents)
         children = []
-        while len(children) < pop_size//2:
+        while len(children) < total_combs//2:
             p1, p2 = random.sample(parents, 2)
-            child = sorted(list(set(random.sample(p1,3)+random.sample(p2,3))))
+            child = sorted(list(set(random.sample(p1,3) + random.sample(p2,3))))
             while len(child) < 6:
                 r = random.randint(1,45)
                 if r not in child: child.append(r)
-            child = mutate(child)
-            if check_consecutive_rule(child):
+            child = mutate(child, mutation_rate)
+            tchild = tuple(child)
+            if check_consecutive_rule(child) and tchild not in child_set:
+                child_set.add(tchild)
                 children.append(child)
         pop = parents + children
+    
     scored = [(c, fitness_func(c, base_probs)) for c in pop]
     scored.sort(key=lambda x:x[1], reverse=True)
     return scored[:10]
@@ -197,7 +193,7 @@ lotto_grid=[
 # =========================
 # Streamlit UI
 # =========================
-st.title("🎯 통합 로또 추천기 V2")
+st.title("🎯 통합 로또 추천기 V3")
 st.write("최신 데이터를 기반으로 10세트 추천 번호를 생성합니다.")
 
 if st.button("추천 번호 생성"):
@@ -207,7 +203,7 @@ if st.button("추천 번호 생성"):
             st.warning("데이터를 가져오지 못했습니다.")
         else:
             probs = compute_combined_probabilities(df, lotto_grid)
-            final = evolve_combinations(probs, fitness_func)
+            final = evolve_large_combinations(probs, fitness_func)
             
             st.success("✅ 추천 번호 생성 완료!")
             for i,(comb,score) in enumerate(final,1):
