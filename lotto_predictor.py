@@ -1,15 +1,13 @@
 import streamlit as st
-import requests
+import requests, re, time, itertools, random
 import pandas as pd
-import random
-import time
-import re
+import numpy as np
 import matplotlib.pyplot as plt
 
 # =========================
-# 1️⃣ 로또 용지 배열 & 좌표
+# 1️⃣ 대한민국 로또 7x7 배열
 # =========================
-grid = [
+lotto_grid = [
     [1,2,3,4,5,6,7],
     [8,9,10,11,12,13,14],
     [15,16,17,18,19,20,21],
@@ -19,235 +17,215 @@ grid = [
     [43,44,45]
 ]
 
-num_to_coord = {}
-for r,row in enumerate(grid):
-    for c,num in enumerate(row):
-        num_to_coord[num] = (c, -r)
+def number_to_coord(num):
+    for r, row in enumerate(lotto_grid):
+        if num in row:
+            return (r, row.index(num))
+    return None
 
 # =========================
-# 2️⃣ 최신 회차 번호 가져오기
+# 2️⃣ 데이터 가져오기
 # =========================
 def get_latest_draw_no():
     url = "https://www.dhlottery.co.kr/common.do?method=main"
     try:
         resp = requests.get(url)
-        html = resp.text
-        m = re.search(r'id="lottoDrwNo">(\d+)<\/strong>', html)
-        if m:
-            return int(m.group(1))
-    except:
-        return None
+        m = re.search(r'id="lottoDrwNo">(\d+)<\/strong>', resp.text)
+        if m: return int(m.group(1))
+    except: return None
     return None
 
-# =========================
-# 3️⃣ 특정 회차 번호 가져오기
-# =========================
 def fetch_lotto(draw_no):
     url = f"https://www.dhlottery.co.kr/common.do?method=getLottoNumber&drwNo={draw_no}"
     try:
         data = requests.get(url).json()
-        if data.get("returnValue") != "success":
-            return None
+        if data.get("returnValue") != "success": return None
         nums = [data[f"drwtNo{i}"] for i in range(1,7)]
         bonus = data["bnusNo"]
         return {"draw_no": draw_no, "numbers": nums, "bonus": bonus}
-    except:
-        return None
+    except: return None
 
-# =========================
-# 4️⃣ 최근 N회차 불러오기
-# =========================
-def fetch_recent(draw_count=50):
+@st.cache_data
+def fetch_recent(draw_count=100):
     latest = get_latest_draw_no()
-    if not latest:
-        st.error("최신 회차를 가져올 수 없습니다.")
-        return pd.DataFrame()
+    if not latest: return pd.DataFrame()
     start = max(1, latest - draw_count + 1)
     records = []
     for drw in range(start, latest + 1):
         rec = fetch_lotto(drw)
-        if rec:
-            records.append(rec)
+        if rec: records.append(rec)
         time.sleep(0.05)
     return pd.DataFrame(records)
 
 # =========================
-# 5️⃣ 구간별 평균 계산
+# 3️⃣ 마르코프 전이 행렬
 # =========================
-def get_group_stats(df):
-    groups = {i: [] for i in range(1,6)}
-    for nums in df['numbers']:
-        counts = [0]*5
-        for n in nums:
-            if 1<=n<=9: counts[0]+=1
-            elif 10<=n<=19: counts[1]+=1
-            elif 20<=n<=29: counts[2]+=1
-            elif 30<=n<=39: counts[3]+=1
-            elif 40<=n<=45: counts[4]+=1
-        for i in range(5):
-            groups[i+1].append(counts[i])
-    avg_counts = {i: round(sum(lst)/len(lst),2) for i,lst in groups.items()}
-    return avg_counts
-
-def get_group_weights(avg_counts):
-    weights = []
-    for i,num_range in enumerate([(1,9),(10,19),(20,29),(30,39),(40,45)],1):
-        start,end = num_range
-        w = avg_counts[i]/6
-        for n in range(start,end+1):
-            weights.append((n,w))
-    nums,ws = zip(*weights)
-    ws = pd.Series(ws,index=nums)
-    ws = ws/ws.sum()
-    return ws
+def build_transition_matrix(numbers):
+    n_numbers = 45
+    transition_count = np.zeros((n_numbers, n_numbers), dtype=int)
+    for i in range(len(numbers)-1):
+        current = numbers[i] - 1
+        next_ = numbers[i+1] - 1
+        for c in current:
+            for n in next_:
+                transition_count[c][n] += 1
+    transition_prob = transition_count / transition_count.sum(axis=1, keepdims=True)
+    transition_prob = np.nan_to_num(transition_prob)
+    return transition_prob
 
 # =========================
-# 6️⃣ 연속 번호
+# 4️⃣ 몬테카를로 시뮬레이션
 # =========================
-def count_consecutive(nums):
-    nums = sorted(nums)
-    max_seq = 1
-    cur_seq = 1
-    for i in range(1,len(nums)):
-        if nums[i]==nums[i-1]+1:
-            cur_seq+=1
-            max_seq=max(max_seq,cur_seq)
-        else:
-            cur_seq=1
-    return max_seq
+def monte_carlo_a(last_draw, transition_prob, n_sim=2000):
+    counts = np.zeros(45)
+    for _ in range(n_sim):
+        selected = set()
+        for c in last_draw - 1:
+            nums = np.random.choice(np.arange(45), 6, replace=False, p=transition_prob[c])
+            selected.update(nums)
+        for num in selected: counts[num] += 1
+    return counts / n_sim
 
-def get_consecutive_stats(df):
-    seq_counts=[]
-    for nums in df['numbers']:
-        seq_counts.append(count_consecutive(nums))
-    series = pd.Series(seq_counts)
-    probs = series.value_counts(normalize=True).sort_index()
-    return probs
-
-# =========================
-# 7️⃣ 좌표 기반 선 패턴 (세로 1자 패널티 적용)
-# =========================
-def coord_distance(n1,n2):
-    x1,y1=num_to_coord[n1]
-    x2,y2=num_to_coord[n2]
-    return abs(x1-x2)+abs(y1-y2)
-
-def adjacent_score(combo):
-    score=0
-    xs=[num_to_coord[n][0] for n in combo]
-    col_counts = pd.Series(xs).value_counts()
-    # 세로 집중 패널티
-    for cnt in col_counts:
-        if cnt>=3: score -= 2*(cnt-2)
-    # 거리 기반 점수
-    for i in range(len(combo)-1):
-        dist=coord_distance(combo[i],combo[i+1])
-        if dist==1: score+=2
-        elif dist==2: score+=1
-    return score
-
-# =========================
-# 8️⃣ 번호 생성 (연번 최대 2개, 연번 그룹 최대 1개)
-# =========================
-def generate_numbers(ws, conseq_probs, past_combos, sum_range=(100,170), even_range=(2,4)):
-    while True:
-        selected = random.choices(ws.index.tolist(), weights=ws.tolist(), k=6)
-        selected = sorted(set(selected))
+def monte_carlo_b(last_draw, transition_prob, n_sim=2000):
+    counts = np.zeros(45)
+    for _ in range(n_sim):
+        selected = set()
         while len(selected) < 6:
-            candidate = random.choices(ws.index.tolist(), weights=ws.tolist(), k=1)[0]
-            if candidate not in selected:
-                selected.append(candidate)
-        selected.sort()
+            c = random.choice(last_draw) - 1
+            num = np.random.choice(np.arange(45), 1, p=transition_prob[c])[0]
+            selected.add(num)
+        for num in selected: counts[num] += 1
+    return counts / n_sim
 
-        # 과거 당첨번호와 겹치면 다시 선택
-        if any(set(selected) == set(past) for past in past_combos):
-            continue
+def recommend_set(last_draw, transition_prob):
+    probs_a = monte_carlo_a(last_draw, transition_prob)
+    probs_b = monte_carlo_b(last_draw, transition_prob)
+    avg_probs = (probs_a + probs_b)/2
+    recommended = np.argsort(avg_probs)[-6:] + 1
+    return sorted(recommended), avg_probs
 
-        even = sum(1 for n in selected if n % 2 == 0)
-        total_sum = sum(selected)
-        pattern_score = adjacent_score(selected)
-
-        # 🔹 연번 그룹 개수 계산
-        seq_count = 0
-        nums_sorted = sorted(selected)
-        i = 0
-        while i < len(nums_sorted) - 1:
-            if nums_sorted[i+1] == nums_sorted[i] + 1:
-                seq_count += 1
-                # 그룹 건너뛰기
-                while i+1 < len(nums_sorted) and nums_sorted[i+1] == nums_sorted[i] + 1:
-                    i += 1
-            i += 1
-
-        max_seq = count_consecutive(selected)
-
-        # 조건: 연번 최대 2개, 연번 그룹 최대 1개
-        if (even_range[0] <= even <= even_range[1] and
-            sum_range[0] <= total_sum <= sum_range[1] and
-            max_seq <= 2 and
-            seq_count <= 1):
-            return tuple(selected), pattern_score
+def recommend_10_sets(df):
+    numbers = np.array(df['numbers'].tolist())
+    last_draw = numbers[-1]
+    transition_prob = build_transition_matrix(numbers)
+    sets = []
+    for _ in range(10):
+        rec_set, _ = recommend_set(last_draw, transition_prob)
+        sets.append(rec_set)
+    total_counts = np.zeros(45)
+    for s in sets:
+        for num in s: total_counts[num-1] += 1
+    total_probs = total_counts / 10
+    return sets, total_probs
 
 # =========================
-# 9️⃣ 분석 & 예측
+# 5️⃣ 그룹 분류 및 조합 생성
 # =========================
-def analyze_and_predict(df50, df100, num_combinations=10):
-    if df50.empty or df100.empty:
-        return []
+def split_groups(probs):
+    sorted_idx = np.argsort(probs)[::-1]
+    group_a = sorted_idx[:15]+1
+    group_b = sorted_idx[15:30]+1
+    group_c = sorted_idx[30:]+1
+    return group_a.tolist(), group_b.tolist(), group_c.tolist()
 
-    avg50=get_group_stats(df50)
-    avg100=get_group_stats(df100)
-    combined_avg={k: avg50[k]*0.7+avg100[k]*0.3 for k in avg50}
-    ws=get_group_weights(combined_avg)
+def generate_group_combinations(group_a, group_b, group_c):
+    combs = []
+    for n_a in range(1,6):
+        for n_b in range(1,6-n_a):
+            n_c = 6 - n_a - n_b
+            for ca in itertools.combinations(group_a, n_a):
+                for cb in itertools.combinations(group_b, n_b):
+                    for cc in itertools.combinations(group_c, n_c):
+                        combs.append(sorted(list(ca)+list(cb)+list(cc)))
+    return combs
 
-    conseq50=get_consecutive_stats(df50)
-    conseq100=get_consecutive_stats(df100)
-    conseq_probs=(conseq50*0.7).add(conseq100*0.3,fill_value=0)
-    conseq_probs=conseq_probs/conseq_probs.sum()
+def calculate_efficiency(comb_list, probs):
+    eff_list = []
+    for comb in comb_list:
+        eff = sum([probs[num-1] for num in comb])
+        eff_list.append((comb, eff))
+    eff_list.sort(key=lambda x: x[1], reverse=True)
+    return eff_list
 
-    past_combos=df100["numbers"].tolist()
-    candidate_list=[]
-    for _ in range(1000):
-        combo, pat_score=generate_numbers(ws, conseq_probs, past_combos)
-        candidate_list.append((combo, pat_score))
-    candidate_list.sort(key=lambda x:x[1], reverse=True)
-    final_combos=[x[0] for x in candidate_list[:num_combinations]]
-
-    return final_combos
-
-# =========================
-# 🔟 시각화
-# =========================
-def plot_combo(combo):
-    plt.figure(figsize=(7,7))
-    for r,row in enumerate(grid):
-        for c,num in enumerate(row):
-            plt.text(c,-r,str(num),fontsize=12,ha='center',va='center',color='gray')
-    xs=[num_to_coord[n][0] for n in combo]
-    ys=[num_to_coord[n][1] for n in combo]
-    plt.plot(xs,ys,marker='o',color='red',linewidth=2)
-    for n,x,y in zip(combo,xs,ys):
-        plt.text(x,y+0.1,str(n),fontsize=12,color='blue',ha='center')
-    plt.axis('off')
-    st.pyplot(plt)
+def select_best_combinations(eff_list, top_n=50):
+    selected = []
+    for comb, eff in eff_list:
+        if comb not in selected: selected.append(comb)
+        if len(selected)>=top_n: break
+    return selected
 
 # =========================
-# 1️⃣1️⃣ Streamlit UI
+# 6️⃣ 다차원 지아넬라 패턴 분석
 # =========================
-st.title("🎯 로또 예측기")
-st.caption("50회 최신 + 100회 장기 패턴 혼합")
+def gianella_pattern(numbers):
+    coords = [number_to_coord(n) for n in numbers]
+    row_counts = [0]*7
+    col_counts = [0]*7
+    for r,c in coords:
+        row_counts[r]+=1
+        col_counts[c]+=1
+    diag1 = sum([1 for r,c in coords if r==c])
+    diag2 = sum([1 for r,c in coords if r==6-c])
+    score = sum([x**2 for x in row_counts])+sum([x**2 for x in col_counts])+diag1+diag2
+    return {
+        "coords": coords, "row_counts": row_counts, "col_counts": col_counts,
+        "diag1_count": diag1, "diag2_count": diag2, "pattern_score": score
+    }
 
-if st.button("예측 번호 10개 생성 및 시각화"):
-    st.info("🔄 최근 50회 + 100회 로또 데이터 수집 중...")
-    df50=fetch_recent(50)
-    df100=fetch_recent(100)
+def plot_lotto_grid(numbers):
+    grid_map = np.zeros((7,7))
+    for n in numbers:
+        coord = number_to_coord(n)
+        if coord: r,c = coord; grid_map[r,c]=1
+    fig, ax = plt.subplots()
+    ax.imshow(grid_map, cmap='Greens', origin='upper')
+    for r in range(7):
+        for c in range(7):
+            val = lotto_grid[r][c] if c<len(lotto_grid[r]) else ''
+            ax.text(c, r, val, ha='center', va='center', color='black')
+    ax.set_xticks(range(7)); ax.set_yticks(range(7))
+    ax.set_xticklabels([]); ax.set_yticklabels([])
+    return fig
 
-    if not df50.empty and not df100.empty:
-        st.success("✅ 데이터 수집 완료! 번호 생성 중...")
-        final_combos=analyze_and_predict(df50, df100)
-        st.subheader("생성된 10개 조합")
-        for idx, combo in enumerate(final_combos,1):
-            st.write(f"{idx}: {combo}")
-            plot_combo(combo)
-    else:
-        st.error("데이터를 불러오지 못했습니다.")
+# =========================
+# 7️⃣ 최종 추천 필터링 (효율 + 패턴)
+# =========================
+def filter_by_pattern(best_combs, probs, pattern_threshold=8):
+    filtered = []
+    for comb in best_combs:
+        pat = gianella_pattern(comb)
+        if pat['pattern_score'] >= pattern_threshold:
+            filtered.append((comb, pat))
+    # 효율순 정렬
+    filtered.sort(key=lambda x: sum([probs[num-1] for num in x[0]]), reverse=True)
+    return filtered[:10]
+
+# =========================
+# 8️⃣ Streamlit UI (수정)
+# =========================
+st.title("로또 추천기")
+
+if st.button("10세트 추천 & 최종 추천 조합 생성"):
+    with st.spinner("번호 생성 중..."):
+        df = fetch_recent(100)
+        if df.empty: 
+            st.error("최근 데이터를 가져올 수 없습니다.")
+        else:
+            # 10세트 추천과 각 번호 출현 확률 계산 (화면에는 표시하지 않음)
+            sets, probs = recommend_10_sets(df)
+
+            # 그룹 분류 및 모든 조합 생성
+            group_a, group_b, group_c = split_groups(probs)
+            all_combs = generate_group_combinations(group_a, group_b, group_c)
+            eff_list = calculate_efficiency(all_combs, probs)
+            best_combs = select_best_combinations(eff_list, top_n=50)
+
+            # 최종 추천 10개 조합 (화면에 표시)
+            final_combs = filter_by_pattern(best_combs, probs, pattern_threshold=8)
+
+            st.subheader("🔹 최종 추천 조합 (상위 10개)")
+            for i, (comb, pat) in enumerate(final_combs):
+                st.write(f"조합 {i+1}: {comb}")
+                st.write(f"패턴 점수: {pat['pattern_score']}, 행: {pat['row_counts']}, 열: {pat['col_counts']}, 대각선1: {pat['diag1_count']}, 대각선2: {pat['diag2_count']}")
+                fig = plot_lotto_grid(comb)
+                st.pyplot(fig)
