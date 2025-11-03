@@ -147,14 +147,14 @@ def adjacent_score(combo):
     return score
 
 # =========================
-# 8️⃣ 번호 생성 (연번 2개 이하 제한)
+# 8️⃣ 번호 생성 (연번 최대 2개, 연번 그룹 최대 1개)
 # =========================
 def generate_numbers(ws, conseq_probs, past_combos, sum_range=(100,170), even_range=(2,4)):
     while True:
-        selected=random.choices(ws.index.tolist(),weights=ws.tolist(),k=6)
-        selected=sorted(set(selected))
-        while len(selected)<6:
-            candidate=random.choices(ws.index.tolist(),weights=ws.tolist(),k=1)[0]
+        selected = random.choices(ws.index.tolist(), weights=ws.tolist(), k=6)
+        selected = sorted(set(selected))
+        while len(selected) < 6:
+            candidate = random.choices(ws.index.tolist(), weights=ws.tolist(), k=1)[0]
             if candidate not in selected:
                 selected.append(candidate)
         selected.sort()
@@ -163,15 +163,29 @@ def generate_numbers(ws, conseq_probs, past_combos, sum_range=(100,170), even_ra
         if any(set(selected) == set(past) for past in past_combos):
             continue
 
-        even=sum(1 for n in selected if n%2==0)
-        total_sum=sum(selected)
-        max_seq=count_consecutive(selected)
-        pattern_score=adjacent_score(selected)
+        even = sum(1 for n in selected if n % 2 == 0)
+        total_sum = sum(selected)
+        pattern_score = adjacent_score(selected)
 
-        # 🔹 연번 제한 2개 이하
-        if (even_range[0]<=even<=even_range[1] and
-            sum_range[0]<=total_sum<=sum_range[1] and
-            max_seq <= 2):
+        # 🔹 연번 그룹 개수 계산
+        seq_count = 0
+        nums_sorted = sorted(selected)
+        i = 0
+        while i < len(nums_sorted) - 1:
+            if nums_sorted[i+1] == nums_sorted[i] + 1:
+                seq_count += 1
+                # 그룹 건너뛰기
+                while i+1 < len(nums_sorted) and nums_sorted[i+1] == nums_sorted[i] + 1:
+                    i += 1
+            i += 1
+
+        max_seq = count_consecutive(selected)
+
+        # 조건: 연번 최대 2개, 연번 그룹 최대 1개
+        if (even_range[0] <= even <= even_range[1] and
+            sum_range[0] <= total_sum <= sum_range[1] and
+            max_seq <= 2 and
+            seq_count <= 1):
             return tuple(selected), pattern_score
 
 # =========================
