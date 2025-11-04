@@ -1,16 +1,8 @@
-"""
-통합 로또 추천기 (Streamlit UI)
-- 버튼 클릭으로 최신 데이터 기반 10세트 추천
-- 유전 알고리즘 개선: 10000개 개체 기반 최적화
-"""
 import streamlit as st
 import numpy as np, random, itertools, time, re, requests, pandas as pd
-from sklearn.cluster import KMeans
 import networkx as nx
-from tensorflow.keras.models import Sequential
-from tensorflow.keras.layers import LSTM, Dense
 
-st.set_page_config(page_title="통합 로또 추천기", layout="centered")
+st.set_page_config(page_title="통합 로또 추천기 V4 Optimized", layout="centered")
 
 # =========================
 # 1️⃣ 데이터 가져오기
@@ -35,7 +27,7 @@ def fetch_lotto(draw_no):
     except: return None
 
 @st.cache_data
-def fetch_recent(draw_count=100):
+def fetch_recent(draw_count=200):
     latest = get_latest_draw_no()
     if not latest: return pd.DataFrame()
     start = max(1, latest - draw_count + 1)
@@ -43,10 +35,12 @@ def fetch_recent(draw_count=100):
     for drw in range(start, latest + 1):
         rec = fetch_lotto(drw)
         if rec: records.append(rec)
-        time.sleep(0.05)
+        time.sleep(0.01)
     return pd.DataFrame(records)
 
-# === 마르코프 전이 확률 ===
+# =========================
+# 2️⃣ 마르코프 전이 확률
+# =========================
 def build_transition_matrix(numbers):
     n = 45
     m = np.zeros((n,n))
@@ -57,41 +51,40 @@ def build_transition_matrix(numbers):
     p = m / m.sum(1, keepdims=True)
     return np.nan_to_num(p)
 
-# === LSTM 시계열 보정 ===
-def lstm_forecast(history, lookback=30):
-    X, y = [], []
-    for i in range(len(history)-lookback):
-        X.append(history[i:i+lookback])
-        y.append(history[i+lookback])
-    X, y = np.array(X), np.array(y)
-    model = Sequential([LSTM(16,input_shape=(lookback,45)),Dense(45,activation='sigmoid')])
-    model.compile(loss='binary_crossentropy',optimizer='adam')
-    model.fit(X,y,epochs=5,batch_size=8,verbose=0)
-    pred = model.predict(X[-1].reshape(1,lookback,45), verbose=0)[0]
-    return pred
+# =========================
+# 3️⃣ Monte Carlo 시뮬레이션 (벡터화)
+# =========================
+def monte_carlo_vectorized(trans_matrix, last_draw, trials=3000):
+    probs_base = trans_matrix[[n-1 for n in last_draw]].sum(0)
+    probs_base = np.maximum(probs_base,0.01)
+    probs_base /= probs_base.sum()
+    draws = np.random.choice(np.arange(1,46), size=(trials,6), p=probs_base)
+    counts = np.bincount(draws.flatten()-1, minlength=45)
+    return counts / counts.sum()
 
-# === 그래프 중심도 기반 가중치 ===
-def graph_centrality(numbers):
-    G = nx.Graph()
-    for draw in numbers:
-        for a, b in itertools.combinations(draw,2):
-            G.add_edge(a,b,weight=G[a][b]['weight']+1 if G.has_edge(a,b) else 1)
-    cent = nx.eigenvector_centrality_numpy(G)
-    arr = np.array([cent.get(i,0) for i in range(1,46)])
-    return arr/arr.sum()
+# =========================
+# 4️⃣ 그룹 기반 조합
+# =========================
+def divide_into_groups(probabilities):
+    sorted_idx = np.argsort(-probabilities)
+    g1 = sorted_idx[:15]+1
+    g2 = sorted_idx[15:30]+1
+    g3 = sorted_idx[30:]+1
+    return g1.tolist(), g2.tolist(), g3.tolist()
 
-# === 군집화 기반 가중치 ===
-def cluster_weights(numbers):
-    arr = np.zeros((len(numbers),45))
-    for i, nums in enumerate(numbers):
-        arr[i, [n-1 for n in nums]] = 1
-    km = KMeans(n_clusters=5,n_init='auto').fit(arr)
-    labels = km.labels_
-    last_label = labels[-1]
-    cluster_mean = arr[labels==last_label].mean(0)
-    return cluster_mean/cluster_mean.sum()
+def generate_group_combinations(groups):
+    combs = []
+    for c1 in itertools.combinations(groups[0],2):
+        for c2 in itertools.combinations(groups[1],2):
+            for c3 in itertools.combinations(groups[2],2):
+                comb = sorted(set(c1+c2+c3))
+                if len(comb)==6 and check_consecutive_rule(comb):
+                    combs.append(comb)
+    return combs
 
-# === 연번 조건 ===
+# =========================
+# 5️⃣ 연번/패턴 체크
+# =========================
 def check_consecutive_rule(comb):
     comb = sorted(comb)
     groups = []
@@ -106,80 +99,9 @@ def check_consecutive_rule(comb):
     if len(groups)>1 or any(len(g)>2 for g in groups): return False
     return True
 
-# === Gianella 패턴 ===
-def gianella_pattern(numbers, grid):
-    coords = [(r,c) for r,row in enumerate(grid) for c,v in enumerate(row) if v in numbers]
-    rows = [0]*7; cols=[0]*7
-    for r,c in coords: rows[r]+=1; cols[c]+=1
-    diag1 = sum(r==c for r,c in coords)
-    diag2 = sum(c==6-r for r,c in coords)
-    return sum(x*x for x in rows) + sum(x*x for x in cols) + diag1 + diag2
-
-# === 통합 확률 계산 ===
-def compute_combined_probabilities(df,grid):
-    numbers = np.array(df['numbers'].tolist())
-    trans = build_transition_matrix(numbers)
-    last = numbers[-1]
-    markov_p = trans[[n-1 for n in last]].sum(0)
-    history = np.zeros((len(numbers),45))
-    for i, nums in enumerate(numbers): history[i, [n-1 for n in nums]] = 1
-    lstm_p = lstm_forecast(history)
-    graph_p = graph_centrality(numbers)
-    cluster_p = cluster_weights(numbers)
-    probs = 0.4*markov_p + 0.25*lstm_p + 0.2*graph_p + 0.15*cluster_p
-    probs = np.maximum(probs,0.02); probs /= probs.sum()
-    return probs
-
-# === Fitness 함수 ===
-def fitness_func(comb, probs):
-    eff = sum(probs[i-1] for i in comb)
-    pat = gianella_pattern(comb, lotto_grid)
-    return 0.7*eff + 0.3*(pat/50)
-
-# === 돌연변이 적용 ===
-def mutate(child, mutation_rate=0.3):
-    if random.random() < mutation_rate:
-        idx = random.randint(0,5)
-        r = random.randint(1,45)
-        while r in child:
-            r = random.randint(1,45)
-        child[idx] = r
-    return sorted(child)
-
-# === 유전 알고리즘: 10000개 기반 최적화 ===
-def evolve_large_combinations(base_probs, fitness_func, total_combs=10000, generations=20, mutation_rate=0.3):
-    pop_set = set()
-    pop = []
-    while len(pop) < total_combs:
-        c = tuple(sorted(random.sample(range(1,46),6)))
-        if check_consecutive_rule(c) and c not in pop_set:
-            pop_set.add(c)
-            pop.append(list(c))
-    
-    for _ in range(generations):
-        scored = [(c, fitness_func(c, base_probs)) for c in pop]
-        scored.sort(key=lambda x:x[1], reverse=True)
-        parents = [c for c,_ in scored[:total_combs//2]]
-        child_set = set(tuple(c) for c in parents)
-        children = []
-        while len(children) < total_combs//2:
-            p1, p2 = random.sample(parents, 2)
-            child = sorted(list(set(random.sample(p1,3) + random.sample(p2,3))))
-            while len(child) < 6:
-                r = random.randint(1,45)
-                if r not in child: child.append(r)
-            child = mutate(child, mutation_rate)
-            tchild = tuple(child)
-            if check_consecutive_rule(child) and tchild not in child_set:
-                child_set.add(tchild)
-                children.append(child)
-        pop = parents + children
-    
-    scored = [(c, fitness_func(c, base_probs)) for c in pop]
-    scored.sort(key=lambda x:x[1], reverse=True)
-    return scored[:10]
-
-# === 대한민국 로또 grid ===
+# =========================
+# 6️⃣ Gianella 패턴
+# =========================
 lotto_grid=[
  [1,2,3,4,5,6,7],
  [8,9,10,11,12,13,14],
@@ -190,20 +112,90 @@ lotto_grid=[
  [43,44,45]
 ]
 
+def gianella_pattern(numbers):
+    coords = [(r,c) for r,row in enumerate(lotto_grid) for c,v in enumerate(row) if v in numbers]
+    rows = [0]*7; cols=[0]*7
+    for r,c in coords: rows[r]+=1; cols[c]+=1
+    diag1 = sum(r==c for r,c in coords)
+    diag2 = sum(c==6-r for r,c in coords)
+    return sum(x*x for x in rows) + sum(x*x for x in cols) + diag1 + diag2
+
+# =========================
+# 7️⃣ Fitness
+# =========================
+def fitness_func(comb, probabilities):
+    eff = sum(probabilities[i-1] for i in comb)
+    pat = gianella_pattern(comb)
+    return 0.7*eff + 0.3*(pat/50)
+
+# =========================
+# 8️⃣ Mutation
+# =========================
+def mutate(child, mutation_rate=0.3):
+    if random.random() < mutation_rate:
+        idx = random.randint(0,5)
+        r = random.randint(1,45)
+        while r in child:
+            r = random.randint(1,45)
+        child[idx] = r
+    return sorted(child)
+
+# =========================
+# 9️⃣ 유전 알고리즘 최적화
+# =========================
+def evolve_combinations(candidates, probabilities, total_combs=5000, generations=12):
+    # 초기 후보 풀 제한
+    if len(candidates) > total_combs:
+        candidates = random.sample(candidates, total_combs)
+    pop = candidates.copy()
+    
+    for _ in range(generations):
+        scored = [(c, fitness_func(c, probabilities)) for c in pop]
+        scored.sort(key=lambda x:x[1], reverse=True)
+        parents = [c for c,_ in scored[:total_combs//2]]
+        children = []
+        while len(children) < total_combs//2:
+            p1, p2 = random.sample(parents, 2)
+            child = sorted(list(set(random.sample(p1,3) + random.sample(p2,3))))
+            while len(child) < 6:
+                r = random.randint(1,45)
+                if r not in child: child.append(r)
+            child = mutate(child)
+            if check_consecutive_rule(child):
+                children.append(child)
+        pop = parents + children
+    
+    scored = [(c, fitness_func(c, probabilities)) for c in pop]
+    scored.sort(key=lambda x:x[1], reverse=True)
+    return scored[:10]
+
 # =========================
 # Streamlit UI
 # =========================
-st.title("🎯 통합 로또 추천기 V3")
-st.write("최신 데이터를 기반으로 10세트 추천 번호를 생성합니다.")
+st.title("🎯 통합 로또 추천기 V4")
+st.write("최적화된 Monte Carlo + 유전 알고리즘 기반 10세트 추천 번호 생성")
 
 if st.button("추천 번호 생성"):
-    with st.spinner("로또 번호 계산 중... 잠시만 기다려주세요."):
+    with st.spinner("계산 중... 잠시만 기다려주세요."):
         df = fetch_recent(200)
         if df.empty:
             st.warning("데이터를 가져오지 못했습니다.")
         else:
-            probs = compute_combined_probabilities(df, lotto_grid)
-            final = evolve_large_combinations(probs, fitness_func)
+            numbers = np.array(df['numbers'].tolist())
+            trans = build_transition_matrix(numbers)
+            last_draw = numbers[-1]
+            
+            # 벡터화 Monte Carlo 2종 평균
+            mc1 = monte_carlo_vectorized(trans, last_draw)
+            mc2 = monte_carlo_vectorized(trans, last_draw)
+            probs = (mc1 + mc2)/2
+            
+            # 그룹 나누기 & 후보 조합 생성
+            groups = divide_into_groups(probs)
+            candidates = generate_group_combinations(groups)
+            
+            # 유전 알고리즘으로 최종 10세트 선택
+            final = evolve_combinations(candidates, probs)
             
             st.success("✅ 추천 번호 생성 완료!")
             for i,(comb,score) in enumerate(final,1):
