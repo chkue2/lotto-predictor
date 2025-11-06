@@ -9,9 +9,9 @@ import os
 # =========================
 # 1️⃣ 페이지 설정
 # =========================
-st.set_page_config(page_title="통합 로또 추천기 V5", layout="centered")
-st.title("🎯 통합 로또 추천기 V5")
-st.write("최적화된 Monte Carlo + 유전 알고리즘 기반 10세트 추천 번호 생성 (중복 제거, 진행 상태 표시)")
+st.set_page_config(page_title="통합 로또 추천기 V8", layout="centered")
+st.title("🎯 통합 로또 추천기 V8")
+st.write("Monte Carlo + Gianella 이중패턴(균형형) + 다양성 강화 버전")
 
 # =========================
 # 2️⃣ 데이터 불러오기 (CSV 변경 감지)
@@ -49,7 +49,7 @@ def build_transition_matrix(numbers):
 # =========================
 def monte_carlo_vectorized(trans_matrix, last_draw, trials=3000):
     probs_base = trans_matrix[[n-1 for n in last_draw]].sum(0)
-    probs_base = np.maximum(probs_base,0.01)
+    probs_base = np.maximum(probs_base, 0.01)
     probs_base /= probs_base.sum()
     draws = np.random.choice(np.arange(1,46), size=(trials,6), p=probs_base)
     counts = np.bincount(draws.flatten()-1, minlength=45)
@@ -90,33 +90,67 @@ def generate_group_combinations(groups):
     return combs
 
 # =========================
-# 6️⃣ Gianella 패턴 + 점수
+# 6️⃣ Gianella 패턴 (V7 Grid 기반)
 # =========================
-lotto_grid=[
- [1,2,3,4,5,6,7],
- [8,9,10,11,12,13,14],
- [15,16,17,18,19,20,21],
- [22,23,24,25,26,27,28],
- [29,30,31,32,33,34,35],
- [36,37,38,39,40,41,42],
- [43,44,45]
+lotto_grid = [
+    [1,2,3,4,5,6,7],
+    [8,9,10,11,12,13,14],
+    [15,16,17,18,19,20,21],
+    [22,23,24,25,26,27,28],
+    [29,30,31,32,33,34,35],
+    [36,37,38,39,40,41,42],
+    [43,44,45]
 ]
 
-def gianella_pattern(numbers):
+def gianella_pattern_v7(numbers):
     coords = [(r,c) for r,row in enumerate(lotto_grid) for c,v in enumerate(row) if v in numbers]
-    rows = [0]*7; cols=[0]*7
-    for r,c in coords: rows[r]+=1; cols[c]+=1
-    diag1 = sum(r==c for r,c in coords)
-    diag2 = sum(c==6-r for r,c in coords)
-    return sum(x*x for x in rows) + sum(x*x for x in cols) + diag1 + diag2
-
-def fitness_func(comb, probabilities):
-    eff = sum(probabilities[i-1] for i in comb)
-    pat = gianella_pattern(comb)
-    return eff, pat, 0.7*eff + 0.3*(pat/50)
+    rows = [0]*7
+    cols = [0]*7
+    for r,c in coords:
+        rows[r] += 1
+        cols[c] += 1
+    row_penalty = sum(max(0, x-2)**2 for x in rows)
+    col_penalty = sum(max(0, x-2)**2 for x in cols)
+    balance_score = 50 - (row_penalty + col_penalty)
+    diag1 = sum(r==c and r<len(lotto_grid) and c<len(lotto_grid[r]) for r,c in coords)
+    diag2 = sum(c==6-r and r<len(lotto_grid) and c<len(lotto_grid[r]) for r,c in coords)
+    diag_score = diag1 + diag2
+    total_score = balance_score + diag_score
+    return total_score
 
 # =========================
-# 7️⃣ 최종 조합 생성 함수 (중복 제거 + 진행 표시)
+# 7️⃣ 원형(Gianella) 패턴 - 다양성 강화
+# =========================
+def gianella_pattern_circular(numbers):
+    zones = {
+        1: range(1,8), 2: range(8,15), 3: range(15,22),
+        4: range(22,29), 5: range(29,36), 6: range(36,43), 7: range(43,46)
+    }
+    counts = {z: len([n for n in numbers if n in rng]) for z, rng in zones.items()}
+    diversity_bonus = len([v for v in counts.values() if v == 1])
+    overlap_penalty = sum(max(0, v-2) for v in counts.values())
+    score = 40 + (diversity_bonus * 2.5) - overlap_penalty
+    return max(0, min(score, 70))
+
+# =========================
+# 8️⃣ 피트니스 함수 (통합형)
+# =========================
+def fitness_func(comb, probabilities):
+    eff = sum(probabilities[i-1] for i in comb)
+    pat_v7 = gianella_pattern_v7(comb)
+    pat_circ = gianella_pattern_circular(comb)
+    combined_pattern = (pat_v7 * 0.5 + pat_circ * 0.5)
+    total_score = 0.7 * eff + 0.3 * (combined_pattern / 50)
+    return eff, pat_v7, pat_circ, combined_pattern, total_score
+
+# =========================
+# 9️⃣ 조합 간 유사도 계산
+# =========================
+def combination_similarity(a, b):
+    return len(set(a) & set(b))
+
+# =========================
+# 🔟 최종 조합 생성
 # =========================
 def generate_final_combinations(n_sets=10):
     trans = build_transition_matrix(numbers_arr)
@@ -129,7 +163,6 @@ def generate_final_combinations(n_sets=10):
     candidates = generate_group_combinations(groups)
     candidates = [sorted(c) for c in candidates]
 
-    # 중복 제거
     unique_candidates = []
     seen = set()
     for c in candidates:
@@ -141,25 +174,31 @@ def generate_final_combinations(n_sets=10):
 
     final_results = []
     displayed = st.empty()
+
     for i in range(n_sets):
-        # 각 조합 중 최고 점수 조합 선택
-        scored = [(c, *fitness_func(c, probs)) for c in candidates]
-        scored.sort(key=lambda x: x[3], reverse=True)
+        scored = []
+        for c in candidates:
+            eff, pat_v7, pat_circ, pat_comb, total = fitness_func(c, probs)
+            diversity_penalty = sum(combination_similarity(c, prev[0]) for prev in final_results) * 0.01
+            final_score = total - diversity_penalty
+            scored.append((c, eff, pat_v7, pat_circ, pat_comb, final_score))
+
+        scored.sort(key=lambda x: x[5], reverse=True)
         best = scored[0]
         final_results.append(best)
-        # 선택된 조합은 후보에서 제거하여 중복 방지
         candidates.remove(best[0])
-        displayed.text(f"{i+1}번째 조합 생성 완료, 다음 조합 생성 중...")
-        time.sleep(0.1)
-    displayed.text("모든 조합 생성 완료!")
+        displayed.text(f"{i+1}번째 조합 생성 중...")
+        time.sleep(0.05)
+
+    displayed.text("✅ 모든 조합 생성 완료!")
     return final_results
 
 # =========================
-# 8️⃣ UI 버튼
+# 11️⃣ UI 버튼
 # =========================
 if st.button("추천 번호 생성"):
     with st.spinner("계산 중... 잠시만 기다려주세요."):
         results = generate_final_combinations(10)
-        st.success("✅ 추천 번호 생성 완료!")
-        for i,(comb, eff, pat, score) in enumerate(results,1):
-            st.write(f"{i:02d}. {comb} | 확률 점수: {eff:.4f} | 패턴 점수: {pat} | 종합 점수: {score:.4f}")
+        st.success("🎯 추천 번호 생성 완료!")
+        for i,(comb, eff, pat_v7, pat_circ, pat_comb, score) in enumerate(results,1):
+            st.write(f"{comb} | 확률: {eff:.4f} | V7패턴: {pat_v7:.1f} | 원형패턴: {pat_circ:.1f} | 통합패턴: {pat_comb:.1f} | 종합점수: {score:.4f}")
