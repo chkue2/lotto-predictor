@@ -17,3 +17,6 @@ watchdog
 
 # === 딥러닝 / LSTM ===
 tensorflow
+
+# === PDF 보고서 생성 ===
+reportlab
