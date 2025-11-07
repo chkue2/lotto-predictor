@@ -21,8 +21,8 @@ plt.rcParams['axes.unicode_minus'] = False
 # =========================
 # 1️⃣ 페이지 설정
 # =========================
-st.set_page_config(page_title="통합 로또 추천기 V11", layout="centered")
-st.title("🎯 통합 로또 추천기 V11")
+st.set_page_config(page_title="통합 로또 추천기 V12", layout="centered")
+st.title("🎯 통합 로또 추천기 V12")
 
 # =========================
 # 2️⃣ 데이터 불러오기
@@ -69,7 +69,7 @@ def monte_carlo_vectorized(trans_matrix, last_draw, trials=3000, focus_mode=Fals
     return counts / counts.sum()
 
 # =========================
-# 5️⃣ 그룹 기반 후보 생성
+# 5️⃣ 그룹 기반 후보 생성 (유연하게)
 # =========================
 def divide_into_groups(probabilities, focus_mode=False):
     sorted_idx = np.argsort(-probabilities)
@@ -99,12 +99,15 @@ def check_consecutive_rule(comb):
 
 def generate_group_combinations(groups):
     combs = []
-    for c1 in itertools.combinations(groups[0],2):
-        for c2 in itertools.combinations(groups[1],2):
-            for c3 in itertools.combinations(groups[2],2):
-                comb = sorted(set(c1+c2+c3))
-                if len(comb)==6 and check_consecutive_rule(comb):
-                    combs.append(comb)
+    # 다양한 조합 비율 허용 (예: 2-2-2, 3-2-1, 1-2-3 등)
+    patterns = [(2,2,2),(3,2,1),(2,3,1),(1,2,3),(1,3,2),(3,1,2)]
+    for p in patterns:
+        for c1 in itertools.combinations(groups[0], p[0]):
+            for c2 in itertools.combinations(groups[1], p[1]):
+                for c3 in itertools.combinations(groups[2], p[2]):
+                    comb = sorted(set(c1+c2+c3))
+                    if len(comb)==6 and check_consecutive_rule(comb):
+                        combs.append(comb)
     return combs
 
 # =========================
@@ -151,7 +154,7 @@ def gianella_pattern_circular(numbers):
     return max(0, min(score, 70))
 
 # =========================
-# 8️⃣ 형태학적 패턴 (대각선 4연속 체크용)
+# 8️⃣ 형태학적 패턴 (UI용)
 # =========================
 def morphological_pattern_score(numbers):
     grid_map = {(r,c):v for r,row in enumerate(lotto_grid) for c,v in enumerate(row)}
@@ -163,7 +166,7 @@ def morphological_pattern_score(numbers):
             while (nr,nc) in grid_map and grid_map[(nr,nc)] in numbers:
                 chain += 1
                 nr += dr; nc += dc
-            if chain >= 4:  # 4개 이상 연결되면 제외
+            if chain >= 4:  # 4개 이상 연결되면 제외 후보에서 제거
                 return 0
     return 20  # UI 표시용 점수
 
@@ -183,7 +186,7 @@ def fitness_func(comb, probabilities, focus_mode=False):
     return eff, pat_v7, pat_circ, pat_morph, combined_pattern, total_score
 
 # =========================
-# 🔟 조합 생성
+# 🔟 최종 조합 생성
 # =========================
 def generate_final_combinations(n_sets=10, focus_mode=False):
     trans = build_transition_matrix(numbers_arr)
@@ -196,9 +199,10 @@ def generate_final_combinations(n_sets=10, focus_mode=False):
     candidates = generate_group_combinations(groups)
     candidates = [sorted(c) for c in candidates]
 
-    # 대각선 4연속 체크
+    # 대각선 4연속 체크: 후보에서 제거
     candidates = [c for c in candidates if morphological_pattern_score(c) != 0]
 
+    # 중복 제거
     unique_candidates = []
     seen = set()
     for c in candidates:
@@ -232,7 +236,7 @@ def generate_final_combinations(n_sets=10, focus_mode=False):
     return final_results, probs
 
 # =========================
-# 11️⃣ 리포트 유틸
+# 11️⃣ 분석 리포트 유틸
 # =========================
 def compute_historic_freq(numbers_array):
     flat = np.array(numbers_array).flatten()
@@ -280,16 +284,13 @@ if st.button("추천 번호 생성 & 분석 리포트"):
         for _, (comb, eff, v7, circ, morph, pat_comb, score) in enumerate(res_focus, 1):
             st.write(f"{comb} | 효율:{eff:.4f} | V7:{v7:.1f} | 원형:{circ:.1f} | 형태학:{morph:.1f} | 통합:{pat_comb:.1f} | 점수:{score:.4f}")
 
-        # DataFrame 합치기
         df_bal = combos_to_df(res_bal, start_index=1, label="균형형")
         df_focus = combos_to_df(res_focus, start_index=1, label="집중형")
         result_df = pd.concat([df_bal, df_focus], ignore_index=True)
 
-        # =========================
-        # 분석 리포트 (기존 코드 그대로)
+        # 기존 분석 리포트
         st.markdown("---")
         st.subheader("📊 강화된 분석 리포트")
-
         hist_counts, hist_probs = compute_historic_freq(numbers_arr)
         hot_idx = np.argsort(-hist_counts)[:10] + 1
         cold_idx = np.argsort(hist_counts)[:10] + 1
