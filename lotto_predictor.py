@@ -6,7 +6,6 @@ import random
 import time
 import os
 import matplotlib.pyplot as plt
-
 from matplotlib import font_manager, rc
 import platform
 
@@ -17,14 +16,13 @@ elif platform.system() == 'Windows':  # Windows
     rc('font', family='Malgun Gothic')
 else:  # Linux
     rc('font', family='NanumGothic')
-
 plt.rcParams['axes.unicode_minus'] = False
 
 # =========================
 # 1️⃣ 페이지 설정
 # =========================
-st.set_page_config(page_title="통합 로또 추천기 V8 Dual", layout="centered")
-st.title("🎯 통합 로또 추천기 V8 Dual")
+st.set_page_config(page_title="통합 로또 추천기 V11", layout="centered")
+st.title("🎯 통합 로또 추천기 V11")
 
 # =========================
 # 2️⃣ 데이터 불러오기
@@ -153,27 +151,39 @@ def gianella_pattern_circular(numbers):
     return max(0, min(score, 70))
 
 # =========================
-# 8️⃣ 피트니스 함수
+# 8️⃣ 형태학적 패턴 (대각선 4연속 체크용)
+# =========================
+def morphological_pattern_score(numbers):
+    grid_map = {(r,c):v for r,row in enumerate(lotto_grid) for c,v in enumerate(row)}
+    pos = [(r,c) for (r,c),v in grid_map.items() if v in numbers]
+    for dr, dc in [(1,1), (1,-1)]:
+        for (r,c) in pos:
+            chain = 1
+            nr, nc = r+dr, c+dc
+            while (nr,nc) in grid_map and grid_map[(nr,nc)] in numbers:
+                chain += 1
+                nr += dr; nc += dc
+            if chain >= 4:  # 4개 이상 연결되면 제외
+                return 0
+    return 20  # UI 표시용 점수
+
+# =========================
+# 9️⃣ 피트니스 함수 (형태학 제외)
 # =========================
 def fitness_func(comb, probabilities, focus_mode=False):
     eff = sum(probabilities[i-1] for i in comb)
     pat_v7 = gianella_pattern_v7(comb)
     pat_circ = gianella_pattern_circular(comb)
-    combined_pattern = (pat_v7 * 0.5 + pat_circ * 0.5)
+    pat_morph = morphological_pattern_score(comb)  # UI용
+    combined_pattern = (pat_v7 * 0.5 + pat_circ * 0.5)  # 형태학 제외
     if focus_mode:
         total_score = 0.85 * eff + 0.15 * (combined_pattern / 50)
     else:
         total_score = 0.7 * eff + 0.3 * (combined_pattern / 50)
-    return eff, pat_v7, pat_circ, combined_pattern, total_score
+    return eff, pat_v7, pat_circ, pat_morph, combined_pattern, total_score
 
 # =========================
-# 9️⃣ 조합 간 유사도
-# =========================
-def combination_similarity(a, b):
-    return len(set(a) & set(b))
-
-# =========================
-# 🔟 조합 생성 (진행바 포함)
+# 🔟 조합 생성
 # =========================
 def generate_final_combinations(n_sets=10, focus_mode=False):
     trans = build_transition_matrix(numbers_arr)
@@ -186,6 +196,9 @@ def generate_final_combinations(n_sets=10, focus_mode=False):
     candidates = generate_group_combinations(groups)
     candidates = [sorted(c) for c in candidates]
 
+    # 대각선 4연속 체크
+    candidates = [c for c in candidates if morphological_pattern_score(c) != 0]
+
     unique_candidates = []
     seen = set()
     for c in candidates:
@@ -196,30 +209,22 @@ def generate_final_combinations(n_sets=10, focus_mode=False):
     candidates = unique_candidates
 
     final_results = []
-
-    # Streamlit 진행바
     progress_bar = st.progress(0)
     status_text = st.empty()
 
     for i in range(n_sets):
         scored = []
         for c in candidates:
-            eff, pat_v7, pat_circ, pat_comb, total = fitness_func(c, probs, focus_mode=focus_mode)
-            diversity_penalty = sum(combination_similarity(c, prev[0]) for prev in final_results) * 0.01
-            final_score = total - diversity_penalty
-            scored.append((c, eff, pat_v7, pat_circ, pat_comb, final_score))
+            eff, pat_v7, pat_circ, pat_morph, pat_comb, total = fitness_func(c, probs, focus_mode=focus_mode)
+            scored.append((c, eff, pat_v7, pat_circ, pat_morph, pat_comb, total))
         if not scored:
             break
-        scored.sort(key=lambda x: x[5], reverse=True)
+        scored.sort(key=lambda x: x[-1], reverse=True)
         best = scored[0]
         final_results.append(best)
-        try:
-            candidates.remove(best[0])
-        except ValueError:
-            pass
-        # 진행바 업데이트
+        candidates.remove(best[0])
         progress_bar.progress((i+1)/n_sets)
-        status_text.text(f"{i+1}/{n_sets}번째 조합 생성 중... ({'집중형' if focus_mode else '균형형'})")
+        status_text.text(f"{i+1}/{n_sets}번째 조합 생성 중...")
         time.sleep(0.05)
 
     status_text.text(f"✅ {'집중형' if focus_mode else '균형형'} 조합 생성 완료!")
@@ -227,7 +232,7 @@ def generate_final_combinations(n_sets=10, focus_mode=False):
     return final_results, probs
 
 # =========================
-# 리포트 유틸 함수
+# 11️⃣ 리포트 유틸
 # =========================
 def compute_historic_freq(numbers_array):
     flat = np.array(numbers_array).flatten()
@@ -245,59 +250,52 @@ def cooccurrence_matrix(numbers_array):
 
 def combos_to_df(results_list, start_index=1, label="균형형"):
     rows = []
-    for idx, (comb, eff, pat_v7, pat_circ, pat_comb, score) in enumerate(results_list, start=start_index):
+    for idx, (comb, eff, v7, circ, morph, pat_comb, score) in enumerate(results_list, start=start_index):
         rows.append({
             "rank": idx,
             "type": label,
             "combo": comb,
             "eff": eff,
-            "v7": pat_v7,
-            "circ": pat_circ,
+            "v7": v7,
+            "circ": circ,
+            "morph": morph,
             "pat": pat_comb,
             "score": score
         })
     return pd.DataFrame(rows)
 
 # =========================
-# 11️⃣ UI 버튼 및 실행
+# 12️⃣ UI
 # =========================
 if st.button("추천 번호 생성 & 분석 리포트"):
-    with st.spinner("계산 중... 잠시만 기다려주세요."):
-        # 균형형
-        results_balanced, probs_balanced = generate_final_combinations(10, focus_mode=False)
-        df_bal = combos_to_df(results_balanced, start_index=1, label="균형형")
-
-        # 집중형
-        results_focused, probs_focused = generate_final_combinations(10, focus_mode=True)
-        df_focus = combos_to_df(results_focused, start_index=11, label="집중형")
-
-        # 통합 DataFrame
-        result_df = pd.concat([df_bal, df_focus]).reset_index(drop=True)
-
-        st.success("🎯 추천 번호 생성 완료!")
+    with st.spinner("계산 중..."):
+        res_bal, _ = generate_final_combinations(10, focus_mode=False)
+        res_focus, _ = generate_final_combinations(10, focus_mode=True)
 
         st.subheader("✅ 균형형 추천 10조합")
-        for _, row in df_bal.iterrows():
-            st.write(f"[{int(row['rank']):02}] {row['combo']} | 확률: {row['eff']:.4f} | V7: {row['v7']:.1f} | 원형: {row['circ']:.1f} | 통합: {row['pat']:.1f} | 점수: {row['score']:.4f}")
+        for _, (comb, eff, v7, circ, morph, pat_comb, score) in enumerate(res_bal, 1):
+            st.write(f"{comb} | 효율:{eff:.4f} | V7:{v7:.1f} | 원형:{circ:.1f} | 형태학:{morph:.1f} | 통합:{pat_comb:.1f} | 점수:{score:.4f}")
 
-        st.subheader("🔥 확률 집중형 추천 10조합")
-        for _, row in df_focus.iterrows():
-            st.write(f"[{int(row['rank']):02}] {row['combo']} | 확률: {row['eff']:.4f} | V7: {row['v7']:.1f} | 원형: {row['circ']:.1f} | 통합: {row['pat']:.1f} | 점수: {row['score']:.4f}")
+        st.subheader("🔥 집중형 추천 10조합")
+        for _, (comb, eff, v7, circ, morph, pat_comb, score) in enumerate(res_focus, 1):
+            st.write(f"{comb} | 효율:{eff:.4f} | V7:{v7:.1f} | 원형:{circ:.1f} | 형태학:{morph:.1f} | 통합:{pat_comb:.1f} | 점수:{score:.4f}")
+
+        # DataFrame 합치기
+        df_bal = combos_to_df(res_bal, start_index=1, label="균형형")
+        df_focus = combos_to_df(res_focus, start_index=1, label="집중형")
+        result_df = pd.concat([df_bal, df_focus], ignore_index=True)
 
         # =========================
-        # 분석 리포트
-        # =========================
+        # 분석 리포트 (기존 코드 그대로)
         st.markdown("---")
         st.subheader("📊 강화된 분석 리포트")
 
-        # 과거 데이터 핫/콜드
         hist_counts, hist_probs = compute_historic_freq(numbers_arr)
         hot_idx = np.argsort(-hist_counts)[:10] + 1
         cold_idx = np.argsort(hist_counts)[:10] + 1
         st.write("**과거 데이터(전체) — 핫 10 / 콜드 10**")
         st.write(f"Hot: {hot_idx.tolist()}, Cold: {cold_idx.tolist()}")
 
-        # 과거 데이터 히스토그램 + 누적확률
         fig1, ax1 = plt.subplots(figsize=(9,3))
         idxs = np.arange(1,46)
         ax1.bar(idxs, hist_counts, color='skyblue', label='출현 횟수')
@@ -308,7 +306,6 @@ if st.button("추천 번호 생성 & 분석 리포트"):
         ax1.legend(loc='upper left'); ax2.legend(loc='upper right')
         st.pyplot(fig1)
 
-        # 공출현 히트맵 + 상위 10쌍
         mat = cooccurrence_matrix(numbers_arr)
         fig2, ax2 = plt.subplots(figsize=(7,6))
         im = ax2.imshow(mat, interpolation='nearest', cmap='YlOrRd')
@@ -323,32 +320,27 @@ if st.button("추천 번호 생성 & 분석 리포트"):
         co_pairs.sort(key=lambda x: -x[1])
         st.write("**상위 10 공출현 번호 쌍:**", [p[0] for p in co_pairs[:10]])
 
-        # 생성된 20조합 분석
         all_generated = [c for c in result_df['combo']]
         flat_generated = np.array(all_generated).flatten()
         gen_counts = np.bincount(flat_generated-1, minlength=45)
         gen_order = np.argsort(-gen_counts) + 1
         st.write("Generated 번호 빈도 상위 10:", gen_order[:10].tolist())
 
-        # 패턴 점수 히스토그램
         fig3, ax3 = plt.subplots(figsize=(9,3))
         ax3.bar(result_df['rank'], result_df['v7'], alpha=0.7, label='V7 패턴')
         ax3.bar(result_df['rank'], result_df['circ'], alpha=0.5, label='원형 패턴')
         ax3.set_xlabel("조합 순위"); ax3.set_ylabel("패턴 점수"); ax3.set_title("20조합 패턴 점수 비교")
         ax3.legend(); st.pyplot(fig3)
 
-        # 번호 그룹별 등장 횟수
         group1 = flat_generated[(flat_generated >=1) & (flat_generated <=15)]
         group2 = flat_generated[(flat_generated >=16) & (flat_generated <=30)]
         group3 = flat_generated[(flat_generated >=31) & (flat_generated <=45)]
         st.write("**번호 그룹별 등장 횟수** 1~15:{}, 16~30:{}, 31~45:{}".format(len(group1), len(group2), len(group3)))
 
-        # 조합 간 중복 통계
         overlaps = [len(set(a) & set(b)) for a,b in itertools.combinations(all_generated,2)]
         overlaps = np.array(overlaps)
         st.write(f"조합 간 평균 중복: {overlaps.mean():.3f}, 최대: {overlaps.max()}, 최소: {overlaps.min()}")
 
-        # 균형형 vs 집중형 교집합
         bal_combos = [c for c in df_bal['combo']]
         foc_combos = [c for c in df_focus['combo']]
         inter_counts = [len(set(a) & set(b)) for a in bal_combos for b in foc_combos]
