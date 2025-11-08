@@ -1,0 +1,26 @@
+# === 데이터 처리 ===
+numpy
+pandas
+
+# === 머신러닝 / 통계 분석 ===
+scikit-learn
+
+# === 그래프 중심도 분석 ===
+networkx
+
+# === 웹 요청 ===
+requests
+
+# === Streamlit UI ===
+streamlit
+watchdog
+
+# === 딥러닝 / LSTM ===
+tensorflow-macos
+tensorflow-metal
+
+# === PDF 보고서 생성 ===
+reportlab
+
+# === 시각화 ===
+matplotlib
