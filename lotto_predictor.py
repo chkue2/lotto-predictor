@@ -127,9 +127,6 @@ def diagonal_penalty_score(comb):
             penalty += 1
     return max(0, 20-penalty*5)
 
-# =========================
-# 행+열 균형 + 대각선 일부 허용
-# =========================
 def generate_group_combinations(groups):
     combs = []
     pattern = (2,2,2)
@@ -147,7 +144,6 @@ def generate_group_combinations(groups):
                 if not check_consecutive_rule(comb):
                     continue
                 if is_strict_diagonal(comb):
-                    # 10% 확률로 대각선 허용
                     if np.random.rand() < 0.1:
                         pass
                     else:
@@ -239,11 +235,10 @@ def generate_final_combinations_fast(n_sets=10, focus_mode=False):
     v7_vals, circ_vals, morph_vals, diag_vals = evaluate_patterns_batch(candidates)
     combined_pattern = (v7_vals*0.45 + circ_vals*0.45 + diag_vals*0.1)
     
-    # ✅ 상위 후보 풀 확대 + 랜덤 가중치 섞기
     rand_factor = np.random.uniform(0.95,1.05,len(eff_vals))
     total_scores = (0.65*eff_vals + 0.35*(combined_pattern/50)) * rand_factor if not focus_mode else (0.8*eff_vals + 0.2*(combined_pattern/50)) * rand_factor
     
-    top_n = int(len(total_scores)*0.8)  # 후보 풀 확대
+    top_n = int(len(total_scores)*0.8)
     rand_n = n_sets - top_n if n_sets > top_n else 0
     top_idx = np.argsort(-total_scores)[:top_n]
     if rand_n>0 and len(total_scores)>top_n:
@@ -253,8 +248,63 @@ def generate_final_combinations_fast(n_sets=10, focus_mode=False):
     
     final_results=[]
     for idx in top_idx[:n_sets]:
+        sorted_comb = sorted(candidates[idx])  # ✅ 오름차순
         final_results.append((
-            candidates[idx],
+            sorted_comb,
+            float(eff_vals[idx]),
+            float(v7_vals[idx]),
+            float(circ_vals[idx]),
+            float(morph_vals[idx]),
+            float(combined_pattern[idx]),
+            float(total_scores[idx])
+        ))
+    return final_results, probs
+
+# =========================
+# 6️⃣ 최종 조합 생성 (혼합형)
+# =========================
+def generate_final_combinations_mixed(n_sets=10, focus_mode=False, free_mode_ratio=0.3):
+    trans = build_transition_matrix(numbers_arr)
+    last_draw = numbers_arr[-1]
+    candidates_raw = monte_carlo_vectorized(trans, last_draw, trials=5000, focus_mode=focus_mode)
+    counts = np.bincount(candidates_raw.flatten()-1, minlength=45)
+    probs = counts / counts.sum()
+    groups = divide_into_groups(probs, focus_mode)
+    candidates_bal = generate_group_combinations(groups)
+    candidates_bal = [c for c in candidates_bal if morphological_pattern_score(c)!=0]
+
+    n_free = int(len(candidates_bal)*free_mode_ratio)
+    candidates_free = []
+    while len(candidates_free) < n_free:
+        comb = np.random.choice(np.arange(1,46), size=6, replace=False).tolist()
+        if morphological_pattern_score(comb) != 0 and check_consecutive_rule(comb):
+            candidates_free.append(comb)
+
+    candidates = candidates_bal + candidates_free
+    unique = {tuple(c):c for c in candidates}
+    candidates = list(unique.values())
+
+    cand_arr = np.array(candidates)
+    eff_vals = probs[cand_arr-1].sum(axis=1)
+    v7_vals, circ_vals, morph_vals, diag_vals = evaluate_patterns_batch(candidates)
+    combined_pattern = (v7_vals*0.45 + circ_vals*0.45 + diag_vals*0.1)
+    
+    rand_factor = np.random.uniform(0.95,1.05,len(eff_vals))
+    total_scores = (0.65*eff_vals + 0.35*(combined_pattern/50)) * rand_factor if not focus_mode else (0.8*eff_vals + 0.2*(combined_pattern/50)) * rand_factor
+    
+    top_n = int(len(total_scores)*0.8)
+    rand_n = n_sets - top_n if n_sets > top_n else 0
+    top_idx = np.argsort(-total_scores)[:top_n]
+    if rand_n>0 and len(total_scores)>top_n:
+        remaining_idx = np.argsort(-total_scores)[top_n:]
+        rand_idx = np.random.choice(remaining_idx, size=rand_n, replace=False)
+        top_idx = np.concatenate([top_idx, rand_idx])
+
+    final_results=[]
+    for idx in top_idx[:n_sets]:
+        sorted_comb = sorted(candidates[idx])  # ✅ 오름차순
+        final_results.append((
+            sorted_comb,
             float(eff_vals[idx]),
             float(v7_vals[idx]),
             float(circ_vals[idx]),
@@ -293,15 +343,15 @@ def combos_to_df(results_list,start_index=1,label="균형형"):
 # =========================
 # 8️⃣ Streamlit UI
 # =========================
-if st.button("추천 번호 생성 & 분석 리포트)"):
+if st.button("추천 번호 생성 & 분석 리포트"):
     with st.spinner("계산 중..."):
-        t0=time.time()
-        res_bal,_=generate_final_combinations_fast(10,focus_mode=False)
-        res_focus,_=generate_final_combinations_fast(10,focus_mode=True)
-        t1=time.time()
+        t0 = time.time()
+        res_mixed,_ = generate_final_combinations_mixed(10, focus_mode=False, free_mode_ratio=0.3)
+        res_focus,_ = generate_final_combinations_fast(10, focus_mode=True)
+        t1 = time.time()
 
-        st.subheader("✅ 균형형 추천 10조합")
-        for _,(comb,eff,v7,circ,morph,pat_comb,score) in enumerate(res_bal,1):
+        st.subheader("✅ 혼합형 추천 10조합 (균형형+자유형)")
+        for _,(comb,eff,v7,circ,morph,pat_comb,score) in enumerate(res_mixed,1):
             st.write(f"{comb} | 효율:{eff:.4f} | V7:{v7:.1f} | 원형:{circ:.1f} | 형태학:{morph:.1f} | 통합:{pat_comb:.1f} | 점수:{score:.4f}")
 
         st.subheader("🔥 집중형 추천 10조합")
@@ -310,7 +360,8 @@ if st.button("추천 번호 생성 & 분석 리포트)"):
 
         st.write(f"계산 소요 시간: {t1-t0:.2f}초")
 
-        df_bal=combos_to_df(res_bal,start_index=1,label="균형형")
+        # 데이터프레임 생성
+        df_bal=combos_to_df(res_mixed,start_index=1,label="혼합형")
         df_focus=combos_to_df(res_focus,start_index=1,label="집중형")
         result_df=pd.concat([df_bal,df_focus],ignore_index=True)
 
