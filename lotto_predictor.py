@@ -28,8 +28,7 @@ st.title("🎯 통합 로또 추천기 V14")
 
 CSV_FILE = "lotto_data.csv"
 
-@st.cache_data(show_spinner=False)
-def load_lotto_data(file_path, file_mtime):
+def load_lotto_data(file_path):
     df = pd.read_csv(file_path)
     df['numbers'] = df[[f"번호{i}" for i in range(1,7)]].values.tolist()
     return df
@@ -38,7 +37,7 @@ def get_file_mtime(file_path):
     return os.path.getmtime(file_path)
 
 csv_mtime = get_file_mtime(CSV_FILE)
-df = load_lotto_data(CSV_FILE, csv_mtime)
+df = load_lotto_data(CSV_FILE)
 numbers_arr = np.array(df['numbers'].tolist())
 
 # =========================
@@ -59,17 +58,35 @@ def build_transition_matrix(numbers):
 # =========================
 # 2️⃣ Monte Carlo 시뮬레이션
 # =========================
-def monte_carlo_vectorized(trans_matrix, last_draw, trials=3000, focus_mode=False, random_perturb=0.02):
+def apply_recent_draw_penalty(probs_base, last_draw, penalty_factor=0.2):
+    """
+    최근 회차에 나온 번호들의 확률을 낮춤.
+    penalty_factor: 0 ~ 1, 작을수록 확률 더 낮아짐
+    """
+    probs = probs_base.copy()
+    for n in last_draw:
+        probs[n-1] *= penalty_factor  # 최근 번호 확률 감소
+    probs /= probs.sum()  # 확률 정규화
+    return probs
+
+def monte_carlo_vectorized(trans_matrix, last_draw, trials=3000, focus_mode=False, random_perturb=0.02, recent_penalty=True):
     probs_base = trans_matrix[[n-1 for n in last_draw]].sum(0)
     probs_base = np.maximum(probs_base, 0.01)
+    
     if focus_mode:
         probs_base = probs_base ** 2
+    
+    if recent_penalty:
+        probs_base = apply_recent_draw_penalty(probs_base, last_draw, penalty_factor=0.2)
+    
     perturb = np.random.uniform(-random_perturb, random_perturb, size=probs_base.shape)
     probs_base += perturb
     probs_base = np.clip(probs_base, 0.001, None)
     probs_base /= probs_base.sum()
+    
     draws = np.array([np.random.choice(np.arange(1,46), size=6, replace=False, p=probs_base) for _ in range(trials)])
     return draws
+
 
 # =========================
 # 3️⃣ 그룹 분할 및 후보 생성
@@ -127,35 +144,27 @@ def diagonal_penalty_score(comb):
             penalty += 1
     return max(0, 20-penalty*5)
 
-def generate_group_combinations(groups):
-    combs = []
-    pattern = (2,2,2)
+# -------------------------
+# 그룹 조합 생성 (샘플링 기반)
+# -------------------------
+def generate_group_combinations(groups, n_samples=5000):
+    """조합 폭발 방지를 위해 랜덤 샘플링 기반으로 후보 조합 생성"""
     g0, g1, g2 = groups
-    combs0 = list(itertools.combinations(g0, pattern[0]))
-    combs1 = list(itertools.combinations(g1, pattern[1]))
-    combs2 = list(itertools.combinations(g2, pattern[2]))
-
-    for c1 in combs0:
-        for c2 in combs1:
-            for c3 in combs2:
-                comb = tuple(sorted(set(c1 + c2 + c3)))
-                if len(comb) != 6:
-                    continue
-                if not check_consecutive_rule(comb):
-                    continue
-                if is_strict_diagonal(comb):
-                    if np.random.rand() < 0.1:
-                        pass
-                    else:
-                        continue
-                rows = [GRID_POS[n][0] for n in comb]
-                cols = [GRID_POS[n][1] for n in comb]
-                if max([rows.count(r) for r in range(7)]) > 3:
-                    continue
-                if max([cols.count(c) for c in range(7)]) > 3:
-                    continue
-                combs.append(list(comb))
-    return combs
+    candidates = []
+    g_all = g0 + g1 + g2
+    g_all = list(set(g_all))
+    while len(candidates) < n_samples:
+        comb = np.random.choice(g_all, size=6, replace=False).tolist()
+        if not check_consecutive_rule(comb):
+            continue
+        if is_strict_diagonal(comb) and np.random.rand() >= 0.1:
+            continue
+        if morphological_pattern_score(comb) == 0:
+            continue
+        candidates.append(comb)
+    # 중복 제거
+    candidates = list({tuple(c): c for c in candidates}.values())
+    return candidates
 
 # =========================
 # 4️⃣ 패턴 점수
@@ -217,101 +226,107 @@ def evaluate_patterns_batch(candidates):
     return np.array(v7_vals), np.array(circ_vals), np.array(morph_vals), np.array(diag_vals)
 
 # =========================
-# 6️⃣ 최종 조합 생성 (개선)
+# 5️⃣ 최근 번호 패널티
 # =========================
-def generate_final_combinations_fast(n_sets=10, focus_mode=False):
+def recent_number_penalty_dual(candidates, numbers_arr, short_n=20, long_n=50, max_penalty_drop=0.35):
+    penalties = []
+    short_recent = numbers_arr[-short_n-1:-1]
+    long_recent = numbers_arr[-long_n-1:-1]
+    short_flat = short_recent.flatten()
+    long_flat = long_recent.flatten()
+    short_unique_ratio = len(set(short_flat)) / len(short_flat)
+    long_unique_ratio = len(set(long_flat)) / len(long_flat)
+    short_factor = 0.8 + 0.6 * short_unique_ratio
+    long_factor = 0.8 + 0.6 * long_unique_ratio
+    combined_factor = (short_factor * 0.6 + long_factor * 0.4)
+    recent_set = set(long_flat)
+    for comb in candidates:
+        overlap_count = len(set(comb) & recent_set)
+        penalty = 1 - min(overlap_count * 0.05 * combined_factor, max_penalty_drop)
+        penalties.append(penalty)
+    return np.array(penalties)
+
+# =========================
+# 6️⃣ 최종 조합 생성 (Fast, 번호대 균형 제거)
+# =========================
+def generate_final_combinations_fast(n_sets=10, focus_mode=False, ignore_group_balance=True):
     trans = build_transition_matrix(numbers_arr)
     last_draw = numbers_arr[-1]
-    candidates_raw = monte_carlo_vectorized(trans, last_draw, trials=5000, focus_mode=focus_mode)
+    candidates_raw = monte_carlo_vectorized(trans, last_draw, trials=3500, focus_mode=focus_mode)
     counts = np.bincount(candidates_raw.flatten()-1, minlength=45)
     probs = counts / counts.sum()
     groups = divide_into_groups(probs, focus_mode)
-    candidates = generate_group_combinations(groups)
-    candidates = [c for c in candidates if morphological_pattern_score(c)!=0]
-    unique = {tuple(c):c for c in candidates}
-    candidates = list(unique.values())
+    candidates = generate_group_combinations(groups, n_samples=5000)
+
+    top_hot = np.argsort(-counts)[:5] + 1
+    filtered = [c for c in candidates if len(set(c) & set(top_hot)) <= 2]
+    candidates = filtered or candidates
+
     cand_arr = np.array(candidates)
     eff_vals = probs[cand_arr-1].sum(axis=1)
     v7_vals, circ_vals, morph_vals, diag_vals = evaluate_patterns_batch(candidates)
     combined_pattern = (v7_vals*0.45 + circ_vals*0.45 + diag_vals*0.1)
-    
     rand_factor = np.random.uniform(0.95,1.05,len(eff_vals))
-    total_scores = (0.65*eff_vals + 0.35*(combined_pattern/50)) * rand_factor if not focus_mode else (0.8*eff_vals + 0.2*(combined_pattern/50)) * rand_factor
-    
-    top_n = int(len(total_scores)*0.8)
-    rand_n = n_sets - top_n if n_sets > top_n else 0
-    top_idx = np.argsort(-total_scores)[:top_n]
-    if rand_n>0 and len(total_scores)>top_n:
-        remaining_idx = np.argsort(-total_scores)[top_n:]
-        rand_idx = np.random.choice(remaining_idx, size=rand_n, replace=False)
-        top_idx = np.concatenate([top_idx, rand_idx])
-    
+    recent_pen = recent_number_penalty_dual(candidates, numbers_arr, short_n=20, long_n=50)
+
+    if not focus_mode:
+        total_scores = (0.65*eff_vals + 0.35*(combined_pattern/50)) * rand_factor * recent_pen
+    else:
+        total_scores = (0.8*eff_vals + 0.2*(combined_pattern/50)) * rand_factor * recent_pen
+
+    top_idx = np.argsort(-total_scores)[:n_sets]
     final_results=[]
     for idx in top_idx[:n_sets]:
-        sorted_comb = sorted(candidates[idx])  # ✅ 오름차순
-        final_results.append((
-            sorted_comb,
-            float(eff_vals[idx]),
-            float(v7_vals[idx]),
-            float(circ_vals[idx]),
-            float(morph_vals[idx]),
-            float(combined_pattern[idx]),
-            float(total_scores[idx])
-        ))
+        c = sorted(candidates[idx])
+        final_results.append((c, float(eff_vals[idx]), float(v7_vals[idx]), float(circ_vals[idx]),
+                              float(morph_vals[idx]), float(combined_pattern[idx]), float(total_scores[idx])))
     return final_results, probs
 
 # =========================
-# 6️⃣ 최종 조합 생성 (혼합형)
+# 6️⃣ 혼합형 생성
 # =========================
-def generate_final_combinations_mixed(n_sets=10, focus_mode=False, free_mode_ratio=0.3):
+def generate_final_combinations_mixed(n_sets=10, focus_mode=False, free_mode_ratio=0.4):
     trans = build_transition_matrix(numbers_arr)
     last_draw = numbers_arr[-1]
-    candidates_raw = monte_carlo_vectorized(trans, last_draw, trials=5000, focus_mode=focus_mode)
+    candidates_raw = monte_carlo_vectorized(trans, last_draw, trials=3500, focus_mode=focus_mode)
     counts = np.bincount(candidates_raw.flatten()-1, minlength=45)
     probs = counts / counts.sum()
     groups = divide_into_groups(probs, focus_mode)
-    candidates_bal = generate_group_combinations(groups)
+    
+    candidates_bal = generate_group_combinations(groups, n_samples=5000)
     candidates_bal = [c for c in candidates_bal if morphological_pattern_score(c)!=0]
 
     n_free = int(len(candidates_bal)*free_mode_ratio)
     candidates_free = []
     while len(candidates_free) < n_free:
         comb = np.random.choice(np.arange(1,46), size=6, replace=False).tolist()
-        if morphological_pattern_score(comb) != 0 and check_consecutive_rule(comb):
+        if morphological_pattern_score(comb)!=0 and check_consecutive_rule(comb):
             candidates_free.append(comb)
 
-    candidates = candidates_bal + candidates_free
-    unique = {tuple(c):c for c in candidates}
-    candidates = list(unique.values())
+    candidates = list({tuple(c): c for c in candidates_bal + candidates_free}.values())
+
+    top_hot = np.argsort(-counts)[:5] + 1
+    filtered = [c for c in candidates if len(set(c) & set(top_hot)) <= 2]
+    candidates = filtered or candidates
 
     cand_arr = np.array(candidates)
     eff_vals = probs[cand_arr-1].sum(axis=1)
     v7_vals, circ_vals, morph_vals, diag_vals = evaluate_patterns_batch(candidates)
     combined_pattern = (v7_vals*0.45 + circ_vals*0.45 + diag_vals*0.1)
-    
     rand_factor = np.random.uniform(0.95,1.05,len(eff_vals))
-    total_scores = (0.65*eff_vals + 0.35*(combined_pattern/50)) * rand_factor if not focus_mode else (0.8*eff_vals + 0.2*(combined_pattern/50)) * rand_factor
-    
-    top_n = int(len(total_scores)*0.8)
-    rand_n = n_sets - top_n if n_sets > top_n else 0
-    top_idx = np.argsort(-total_scores)[:top_n]
-    if rand_n>0 and len(total_scores)>top_n:
-        remaining_idx = np.argsort(-total_scores)[top_n:]
-        rand_idx = np.random.choice(remaining_idx, size=rand_n, replace=False)
-        top_idx = np.concatenate([top_idx, rand_idx])
+    recent_pen = recent_number_penalty_dual(candidates, numbers_arr, short_n=20, long_n=50)
 
+    if not focus_mode:
+        total_scores = (0.65*eff_vals + 0.35*(combined_pattern/50)) * rand_factor * recent_pen
+    else:
+        total_scores = (0.8*eff_vals + 0.2*(combined_pattern/50)) * rand_factor * recent_pen
+
+    top_idx = np.argsort(-total_scores)[:n_sets]
     final_results=[]
     for idx in top_idx[:n_sets]:
-        sorted_comb = sorted(candidates[idx])  # ✅ 오름차순
-        final_results.append((
-            sorted_comb,
-            float(eff_vals[idx]),
-            float(v7_vals[idx]),
-            float(circ_vals[idx]),
-            float(morph_vals[idx]),
-            float(combined_pattern[idx]),
-            float(total_scores[idx])
-        ))
+        c = sorted(candidates[idx])
+        final_results.append((c, float(eff_vals[idx]), float(v7_vals[idx]), float(circ_vals[idx]),
+                              float(morph_vals[idx]), float(combined_pattern[idx]), float(total_scores[idx])))
     return final_results, probs
 
 # =========================
@@ -348,6 +363,7 @@ if st.button("추천 번호 생성 & 분석 리포트"):
         t0 = time.time()
         res_mixed,_ = generate_final_combinations_mixed(10, focus_mode=False, free_mode_ratio=0.3)
         res_focus,_ = generate_final_combinations_fast(10, focus_mode=True)
+        res_ignore_balance,_ = generate_final_combinations_fast(10, focus_mode=False, ignore_group_balance=True)
         t1 = time.time()
 
         st.subheader("✅ 혼합형 추천 10조합 (균형형+자유형)")
@@ -358,68 +374,8 @@ if st.button("추천 번호 생성 & 분석 리포트"):
         for _,(comb,eff,v7,circ,morph,pat_comb,score) in enumerate(res_focus,1):
             st.write(f"{comb} | 효율:{eff:.4f} | V7:{v7:.1f} | 원형:{circ:.1f} | 형태학:{morph:.1f} | 통합:{pat_comb:.1f} | 점수:{score:.4f}")
 
+        st.subheader("🌟 번호군 균형 제외 추천 10조합")
+        for _,(comb,eff,v7,circ,morph,pat_comb,score) in enumerate(res_ignore_balance,1):
+            st.write(f"{comb} | 효율:{eff:.4f} | V7:{v7:.1f} | 원형:{circ:.1f} | 형태학:{morph:.1f} | 통합:{pat_comb:.1f} | 점수:{score:.4f}")
+
         st.write(f"계산 소요 시간: {t1-t0:.2f}초")
-
-        # 데이터프레임 생성
-        df_bal=combos_to_df(res_mixed,start_index=1,label="혼합형")
-        df_focus=combos_to_df(res_focus,start_index=1,label="집중형")
-        result_df=pd.concat([df_bal,df_focus],ignore_index=True)
-
-        st.markdown("---")
-        st.subheader("📊 강화된 분석 리포트")
-        hist_counts,hist_probs=compute_historic_freq(numbers_arr)
-        hot_idx=np.argsort(-hist_counts)[:10]+1
-        cold_idx=np.argsort(hist_counts)[:10]+1
-        st.write("**과거 데이터(전체) — 핫 10 / 콜드 10**")
-        st.write(f"Hot: {hot_idx.tolist()}, Cold: {cold_idx.tolist()}")
-
-        fig1,ax1=plt.subplots(figsize=(9,3))
-        idxs=np.arange(1,46)
-        ax1.bar(idxs,hist_counts,label='출현 횟수')
-        ax2=ax1.twinx()
-        ax2.plot(idxs,np.cumsum(hist_probs),marker='o',label='누적확률')
-        ax1.set_xlabel("번호"); ax1.set_ylabel("등장 횟수"); ax2.set_ylabel("누적확률")
-        ax1.set_title("과거 데이터 번호 등장 횟수 및 누적확률")
-        ax1.legend(loc='upper left'); ax2.legend(loc='upper right')
-        st.pyplot(fig1)
-
-        mat=cooccurrence_matrix(numbers_arr)
-        fig2,ax2=plt.subplots(figsize=(7,6))
-        im=ax2.imshow(mat,interpolation='nearest',cmap='YlOrRd')
-        ax2.set_title("과거 데이터 공출현 행렬")
-        ax2.set_xlabel("번호"); ax2.set_ylabel("번호")
-        ax2.set_xticks(range(45)); ax2.set_xticklabels(range(1,46))
-        ax2.set_yticks(range(45)); ax2.set_yticklabels(range(1,46))
-        fig2.colorbar(im,ax=ax2,fraction=0.046,pad=0.04)
-        st.pyplot(fig2)
-
-        co_pairs=[((i+1,j+1),mat[i,j]) for i in range(45) for j in range(i+1,45)]
-        co_pairs.sort(key=lambda x:-x[1])
-        st.write("**상위 10 공출현 번호 쌍:**",[p[0] for p in co_pairs[:10]])
-
-        all_generated=[c for c in result_df['combo']]
-        flat_generated=np.array(all_generated).flatten()
-        gen_counts=np.bincount(flat_generated-1,minlength=45)
-        gen_order=np.argsort(-gen_counts)+1
-        st.write("Generated 번호 빈도 상위 10:",gen_order[:10].tolist())
-
-        fig3,ax3=plt.subplots(figsize=(9,3))
-        ax3.bar(result_df['rank'],result_df['v7'],alpha=0.7,label='V7 패턴')
-        ax3.bar(result_df['rank'],result_df['circ'],alpha=0.5,label='원형 패턴')
-        ax3.set_xlabel("조합 순위"); ax3.set_ylabel("패턴 점수"); ax3.set_title("20조합 패턴 점수 비교")
-        ax3.legend(); st.pyplot(fig3)
-
-        group1=flat_generated[(flat_generated>=1)&(flat_generated<=15)]
-        group2=flat_generated[(flat_generated>=16)&(flat_generated<=30)]
-        group3=flat_generated[(flat_generated>=31)&(flat_generated<=45)]
-        st.write("**번호 그룹별 등장 횟수** 1~15:{}, 16~30:{}, 31~45:{}".format(len(group1),len(group2),len(group3)))
-
-        overlaps=[len(set(a)&set(b)) for a,b in itertools.combinations(all_generated,2)]
-        overlaps=np.array(overlaps) if overlaps else np.array([0])
-        st.write(f"조합 간 평균 중복: {overlaps.mean():.3f}, 최대: {overlaps.max()}, 최소: {overlaps.min()}")
-
-        bal_combos=[c for c in df_bal['combo']]
-        foc_combos=[c for c in df_focus['combo']]
-        inter_counts=[len(set(a)&set(b)) for a in bal_combos for b in foc_combos] if bal_combos and foc_combos else [0]
-        inter_counts=np.array(inter_counts)
-        st.write(f"균형형 vs 집중형 평균 교집합: {inter_counts.mean():.3f}, 최대: {inter_counts.max()}")
