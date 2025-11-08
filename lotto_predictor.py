@@ -23,8 +23,8 @@ plt.rcParams['axes.unicode_minus'] = False
 # =========================
 # 설정 및 데이터 불러오기
 # =========================
-st.set_page_config(page_title="통합 로또 추천기 V14 (Optimized)", layout="centered")
-st.title("🎯 통합 로또 추천기 V14 (Optimized)")
+st.set_page_config(page_title="통합 로또 추천기 V14", layout="centered")
+st.title("🎯 통합 로또 추천기 V14")
 
 CSV_FILE = "lotto_data.csv"
 
@@ -293,8 +293,8 @@ def combos_to_df(results_list,start_index=1,label="균형형"):
 # =========================
 # 8️⃣ Streamlit UI
 # =========================
-if st.button("추천 번호 생성 & 분석 리포트 (Optimized V14)"):
-    with st.spinner("계산 중... (V14 최적화)"):
+if st.button("추천 번호 생성 & 분석 리포트)"):
+    with st.spinner("계산 중..."):
         t0=time.time()
         res_bal,_=generate_final_combinations_fast(10,focus_mode=False)
         res_focus,_=generate_final_combinations_fast(10,focus_mode=True)
