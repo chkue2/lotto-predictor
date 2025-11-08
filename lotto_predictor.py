@@ -366,6 +366,9 @@ if st.button("추천 번호 생성 & 분석 리포트"):
         res_ignore_balance,_ = generate_final_combinations_fast(10, focus_mode=False, ignore_group_balance=True)
         t1 = time.time()
 
+        # ----------------------------
+        # 추천 결과 표시
+        # ----------------------------
         st.subheader("✅ 혼합형 추천 10조합 (균형형+자유형)")
         for _,(comb,eff,v7,circ,morph,pat_comb,score) in enumerate(res_mixed,1):
             st.write(f"{comb} | 효율:{eff:.4f} | V7:{v7:.1f} | 원형:{circ:.1f} | 형태학:{morph:.1f} | 통합:{pat_comb:.1f} | 점수:{score:.4f}")
@@ -379,3 +382,41 @@ if st.button("추천 번호 생성 & 분석 리포트"):
             st.write(f"{comb} | 효율:{eff:.4f} | V7:{v7:.1f} | 원형:{circ:.1f} | 형태학:{morph:.1f} | 통합:{pat_comb:.1f} | 점수:{score:.4f}")
 
         st.write(f"계산 소요 시간: {t1-t0:.2f}초")
+
+        # ----------------------------
+        # 추천 결과 → DataFrame
+        # ----------------------------
+        df_mixed = combos_to_df(res_mixed, label="혼합형")
+        df_focus = combos_to_df(res_focus, label="집중형")
+        df_ignore = combos_to_df(res_ignore_balance, label="번호군 균형 제외")
+        df_all = pd.concat([df_mixed, df_focus, df_ignore], ignore_index=True)
+        st.subheader("📋 추천 결과 테이블")
+        st.dataframe(df_all)
+
+        # ----------------------------
+        # 역대 데이터 통계
+        # ----------------------------
+        st.subheader("📊 번호별 출현 빈도")
+        counts, probs = compute_historic_freq(numbers_arr)
+        fig, ax = plt.subplots(figsize=(10,4))
+        ax.bar(np.arange(1,46), counts, color='skyblue')
+        ax.set_xlabel("번호")
+        ax.set_ylabel("출현 횟수")
+        ax.set_title("역대 로또 번호 출현 빈도")
+        st.pyplot(fig)
+
+        st.subheader("📊 공출현 히트맵 (최근 로또 번호 기반)")
+
+        co_mat = cooccurrence_matrix(numbers_arr)
+        fig, ax = plt.subplots(figsize=(14,12))
+        cax = ax.matshow(co_mat, cmap='Reds')
+
+        ax.set_xticks(np.arange(45))
+        ax.set_yticks(np.arange(45))
+        ax.set_xticklabels(np.arange(1,46))
+        ax.set_yticklabels(np.arange(1,46))
+        plt.setp(ax.get_xticklabels(), rotation=90)  # X축 라벨 회전
+
+        plt.colorbar(cax)
+        st.pyplot(fig)
+
