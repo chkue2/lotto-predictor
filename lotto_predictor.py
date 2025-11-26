@@ -165,13 +165,13 @@ def sample_with_quotas(g0, g1, g2, quotas):
     pick += np.random.choice(g2, size=c, replace=False).tolist()
     return sorted(pick)
 
-def generate_group_combinations(groups, n_samples=5000, use_balance=True, quota_patterns=None):
+def generate_group_combinations(groups, n_samples=10000, use_balance=True, quota_patterns=None):
     """조합 폭발 방지를 위해 랜덤 샘플링 기반으로 후보 조합 생성"""
     g0, g1, g2 = groups
     candidates = []
     if use_balance:
         if not quota_patterns:
-            quota_patterns = [(2,2,2), (3,2,1), (2,3,1)]
+            quota_patterns = [(1,2,3), (1,3,2), (2,1,3), (2,2,2), (2,3,1), (3,2,1), (3,1,2)]
         attempts = 0
         max_attempts = n_samples * 20
         while len(candidates) < n_samples and attempts < max_attempts:
@@ -300,7 +300,6 @@ def generate_final_combinations_fast(n_sets=10, focus_mode=False, ignore_group_b
     # 핵심: ignore_group_balance 반영
     candidates = generate_group_combinations(
         groups,
-        n_samples=5000,
         use_balance=(not ignore_group_balance),  # True면 균형형, False면 비균형형
         quota_patterns=[(2,2,2), (3,2,1), (2,3,1)]
     )
@@ -351,7 +350,6 @@ def generate_final_combinations_mixed(n_sets=10, focus_mode=False, free_mode_rat
     # 균형형 후보
     candidates_bal = generate_group_combinations(
         groups,
-        n_samples=5000,
         use_balance=True,
         quota_patterns=[(2,2,2), (3,2,1), (2,3,1)]
     )
