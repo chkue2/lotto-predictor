@@ -21,6 +21,18 @@ else:  # Linux
 plt.rcParams['axes.unicode_minus'] = False
 
 # =========================
+# 고정 파라미터 (슬라이더 제거 후 고정값)
+# =========================
+TRIALS = 10000                # Monte Carlo 샘플 수 (안정성↑, 속도 고려)
+FOCUS_MODE_UI = False         # UI 전역 집중 모드 (기본 False)
+RANDOM_PERTURB = 0.015        # 확률 퍼트버이션(과도한 흔들림 방지)
+RECENT_PENALTY_FACTOR = 0.18  # 최근번호 패널티 강도(기본 0.2보다 살짝 완화)
+INCLUDE_LAST = False          # 최근 1회까지 패널티에 포함 여부(False 권장)
+FREE_MODE_RATIO = 0.30        # 혼합형에서 자유형 비율
+HOT_K = 5                     # 상위 핫넘버 K
+HOT_CAP = 2                   # 한 조합 내 허용 핫넘버 최대 개수
+
+# =========================
 # 설정 및 데이터 불러오기
 # =========================
 st.set_page_config(page_title="통합 로또 추천기 V14", layout="centered")
@@ -28,20 +40,56 @@ st.title("🎯 통합 로또 추천기 V14")
 
 CSV_FILE = "lotto_data.csv"
 
-def load_lotto_data(file_path):
+@st.cache_data
+def load_lotto_data_cached(file_path):
     df = pd.read_csv(file_path)
     df['numbers'] = df[[f"번호{i}" for i in range(1,7)]].values.tolist()
     return df
 
+@st.cache_data
+def build_transition_matrix_cached(numbers_arr, mtime):
+    n = 45
+    m = np.zeros((n, n), dtype=float)
+    for i in range(len(numbers_arr) - 1):
+        for a in numbers_arr[i]:
+            for b in numbers_arr[i + 1]:
+                m[a - 1, b - 1] += 1
+    row_sums = m.sum(axis=1, keepdims=True)
+    with np.errstate(divide='ignore', invalid='ignore'):
+        p = m / row_sums
+    return np.nan_to_num(p)
+
+@st.cache_data
+def historic_stats_cached(numbers_arr, mtime):
+    flat = np.array(numbers_arr).flatten()
+    counts = np.bincount(flat - 1, minlength=45)
+    probs = counts / counts.sum()
+
+    mat = np.zeros((45, 45), dtype=int)
+    for draw in numbers_arr:
+        for a, b in itertools.combinations(draw, 2):
+            mat[a - 1, b - 1] += 1
+            mat[b - 1, a - 1] += 1
+    return (counts, probs), mat
+
 def get_file_mtime(file_path):
     return os.path.getmtime(file_path)
 
-csv_mtime = get_file_mtime(CSV_FILE)
-df = load_lotto_data(CSV_FILE)
+# CSV 로드(예외 처리)
+try:
+    csv_mtime = get_file_mtime(CSV_FILE)
+    df = load_lotto_data_cached(CSV_FILE)
+except FileNotFoundError:
+    st.error(f"CSV 파일을 찾을 수 없습니다: {CSV_FILE}")
+    st.stop()
+except KeyError as e:
+    st.error(f"CSV 컬럼 확인 필요: {e}")
+    st.stop()
+
 numbers_arr = np.array(df['numbers'].tolist())
 
 # =========================
-# 1️⃣ 전이행렬 (마르코프)
+# 1️⃣ 전이행렬 (레거시 함수: 유지만)
 # =========================
 def build_transition_matrix(numbers):
     n = 45
@@ -59,17 +107,21 @@ def build_transition_matrix(numbers):
 # 2️⃣ Monte Carlo 시뮬레이션
 # =========================
 def apply_recent_draw_penalty(probs_base, last_draw, penalty_factor=0.2):
-    """
-    최근 회차에 나온 번호들의 확률을 낮춤.
-    penalty_factor: 0 ~ 1, 작을수록 확률 더 낮아짐
-    """
     probs = probs_base.copy()
     for n in last_draw:
-        probs[n - 1] *= penalty_factor  # 최근 번호 확률 감소
-    probs /= probs.sum()  # 확률 정규화
+        probs[n - 1] *= penalty_factor
+    probs /= probs.sum()
     return probs
 
-def monte_carlo_vectorized(trans_matrix, last_draw, trials=3000, focus_mode=False, random_perturb=0.02, recent_penalty=True):
+def monte_carlo_vectorized(
+    trans_matrix,
+    last_draw,
+    trials=3000,
+    focus_mode=False,
+    random_perturb=0.02,
+    recent_penalty=True,
+    recent_penalty_factor=0.2
+):
     probs_base = trans_matrix[[n - 1 for n in last_draw]].sum(0)
     probs_base = np.maximum(probs_base, 0.01)
 
@@ -77,7 +129,7 @@ def monte_carlo_vectorized(trans_matrix, last_draw, trials=3000, focus_mode=Fals
         probs_base = probs_base ** 2
 
     if recent_penalty:
-        probs_base = apply_recent_draw_penalty(probs_base, last_draw, penalty_factor=0.2)
+        probs_base = apply_recent_draw_penalty(probs_base, last_draw, penalty_factor=recent_penalty_factor)
 
     perturb = np.random.uniform(-random_perturb, random_perturb, size=probs_base.shape)
     probs_base += perturb
@@ -149,13 +201,7 @@ def diagonal_penalty_score(comb):
             penalty += 1
     return max(0, 20 - penalty * 5)
 
-# -------------------------
-# (수정 핵심) 그룹 조합 생성
-# - use_balance=True: 그룹 쿼터 기반 균형형
-# - use_balance=False: 전체 풀에서 자유 추출(비균형형)
-# -------------------------
 def sample_with_quotas(g0, g1, g2, quotas):
-    # quotas: 예) (2,2,2) 또는 (3,2,1) 등
     a, b, c = quotas
     if len(g0) < a or len(g1) < b or len(g2) < c:
         return None
@@ -166,7 +212,6 @@ def sample_with_quotas(g0, g1, g2, quotas):
     return sorted(pick)
 
 def generate_group_combinations(groups, n_samples=10000, use_balance=True, quota_patterns=None):
-    """조합 폭발 방지를 위해 랜덤 샘플링 기반으로 후보 조합 생성"""
     g0, g1, g2 = groups
     candidates = []
     if use_balance:
@@ -201,7 +246,6 @@ def generate_group_combinations(groups, n_samples=10000, use_balance=True, quota
             if morphological_pattern_score(comb) == 0:
                 continue
             candidates.append(sorted(comb))
-    # 중복 제거
     candidates = list({tuple(c): c for c in candidates}.values())
     return candidates
 
@@ -235,11 +279,12 @@ def gianella_pattern_circular(numbers):
 
 def morphological_pattern_score(numbers):
     pos = [GRID_POS[n] for n in numbers]
+    pos_set = set(pos)
     for dr, dc in [(1,1), (1,-1)]:
         for r, c in pos:
             chain = 1
             nr, nc = r + dr, c + dc
-            while (nr, nc) in GRID_POS.values() and (nr, nc) in pos:
+            while (nr, nc) in pos_set:
                 chain += 1
                 nr += dr; nc += dc
             if chain >= 4:
@@ -268,18 +313,26 @@ def evaluate_patterns_batch(candidates):
 # =========================
 # 5️⃣ 최근 번호 패널티
 # =========================
-def recent_number_penalty_dual(candidates, numbers_arr, short_n=20, long_n=50, max_penalty_drop=0.35):
-    penalties = []
-    short_recent = numbers_arr[-short_n-1:-1]
-    long_recent = numbers_arr[-long_n-1:-1]
+def recent_number_penalty_dual(
+    candidates,
+    numbers_arr,
+    short_n=20,
+    long_n=50,
+    include_last_draw=False,
+    max_penalty_drop=0.35
+):
+    end = None if include_last_draw else -1
+    short_recent = numbers_arr[-short_n-1:end]
+    long_recent = numbers_arr[-long_n-1:end]
     short_flat = short_recent.flatten()
     long_flat = long_recent.flatten()
-    short_unique_ratio = len(set(short_flat)) / len(short_flat)
-    long_unique_ratio = len(set(long_flat)) / len(long_flat)
+    short_unique_ratio = len(set(short_flat)) / len(short_flat) if len(short_flat) else 1.0
+    long_unique_ratio = len(set(long_flat)) / len(long_flat) if len(long_flat) else 1.0
     short_factor = 0.8 + 0.6 * short_unique_ratio
     long_factor = 0.8 + 0.6 * long_unique_ratio
     combined_factor = (short_factor * 0.6 + long_factor * 0.4)
     recent_set = set(long_flat)
+    penalties = []
     for comb in candidates:
         overlap_count = len(set(comb) & recent_set)
         penalty = 1 - min(overlap_count * 0.05 * combined_factor, max_penalty_drop)
@@ -290,23 +343,28 @@ def recent_number_penalty_dual(candidates, numbers_arr, short_n=20, long_n=50, m
 # 6️⃣ 최종 조합 생성 (Fast, 번호군 균형 옵션 반영)
 # =========================
 def generate_final_combinations_fast(n_sets=10, focus_mode=False, ignore_group_balance=True):
-    trans = build_transition_matrix(numbers_arr)
+    trans = build_transition_matrix_cached(numbers_arr, csv_mtime)
     last_draw = numbers_arr[-1]
-    candidates_raw = monte_carlo_vectorized(trans, last_draw, trials=3500, focus_mode=focus_mode)
+    candidates_raw = monte_carlo_vectorized(
+        trans, last_draw,
+        trials=TRIALS,
+        focus_mode=focus_mode or FOCUS_MODE_UI,
+        random_perturb=RANDOM_PERTURB,
+        recent_penalty=True,
+        recent_penalty_factor=RECENT_PENALTY_FACTOR
+    )
     counts = np.bincount(candidates_raw.flatten() - 1, minlength=45)
     probs = counts / counts.sum()
-    groups = divide_into_groups(probs, focus_mode)
+    groups = divide_into_groups(probs, focus_mode or FOCUS_MODE_UI)
 
-    # 핵심: ignore_group_balance 반영
     candidates = generate_group_combinations(
         groups,
-        use_balance=(not ignore_group_balance),  # True면 균형형, False면 비균형형
+        use_balance=(not ignore_group_balance),
         quota_patterns=[(2,2,2), (3,2,1), (2,3,1)]
     )
 
-    # 핫넘버 상한 규칙
-    top_hot = np.argsort(-counts)[:5] + 1
-    filtered = [c for c in candidates if len(set(c) & set(top_hot)) <= 2]
+    top_hot = np.argsort(-counts)[:HOT_K] + 1
+    filtered = [c for c in candidates if len(set(c) & set(top_hot)) <= HOT_CAP]
     candidates = filtered or candidates
 
     cand_arr = np.array(candidates)
@@ -314,9 +372,13 @@ def generate_final_combinations_fast(n_sets=10, focus_mode=False, ignore_group_b
     v7_vals, circ_vals, morph_vals, diag_vals = evaluate_patterns_batch(candidates)
     combined_pattern = (v7_vals * 0.45 + circ_vals * 0.45 + diag_vals * 0.1)
     rand_factor = np.random.uniform(0.95, 1.05, len(eff_vals))
-    recent_pen = recent_number_penalty_dual(candidates, numbers_arr, short_n=20, long_n=50)
+    recent_pen = recent_number_penalty_dual(
+        candidates, numbers_arr,
+        short_n=20, long_n=50,
+        include_last_draw=INCLUDE_LAST
+    )
 
-    if not focus_mode:
+    if not (focus_mode or FOCUS_MODE_UI):
         total_scores = (0.65 * eff_vals + 0.35 * (combined_pattern / 50)) * rand_factor * recent_pen
     else:
         total_scores = (0.8 * eff_vals + 0.2 * (combined_pattern / 50)) * rand_factor * recent_pen
@@ -339,23 +401,33 @@ def generate_final_combinations_fast(n_sets=10, focus_mode=False, ignore_group_b
 # =========================
 # 6️⃣ 혼합형 생성 (균형형 + 비균형형 혼합)
 # =========================
-def generate_final_combinations_mixed(n_sets=10, focus_mode=False, free_mode_ratio=0.4):
-    trans = build_transition_matrix(numbers_arr)
+def generate_final_combinations_mixed(n_sets=10, focus_mode=False, free_mode_ratio=None):
+    if free_mode_ratio is None:
+        free_mode_ratio = FREE_MODE_RATIO
+
+    trans = build_transition_matrix_cached(numbers_arr, csv_mtime)
     last_draw = numbers_arr[-1]
-    candidates_raw = monte_carlo_vectorized(trans, last_draw, trials=3500, focus_mode=focus_mode)
+    candidates_raw = monte_carlo_vectorized(
+        trans, last_draw,
+        trials=TRIALS,
+        focus_mode=focus_mode or FOCUS_MODE_UI,
+        random_perturb=RANDOM_PERTURB,
+        recent_penalty=True,
+        recent_penalty_factor=RECENT_PENALTY_FACTOR
+    )
     counts = np.bincount(candidates_raw.flatten() - 1, minlength=45)
     probs = counts / counts.sum()
-    groups = divide_into_groups(probs, focus_mode)
+    groups = divide_into_groups(probs, focus_mode or FOCUS_MODE_UI)
 
-    # 균형형 후보
     candidates_bal = generate_group_combinations(
         groups,
         use_balance=True,
         quota_patterns=[(2,2,2), (3,2,1), (2,3,1)]
     )
 
-    # 비균형형 후보
     n_free = int(len(candidates_bal) * free_mode_ratio)
+    if n_free <= 0:
+        n_free = 1
     candidates_free = generate_group_combinations(
         groups,
         n_samples=max(1, n_free),
@@ -364,9 +436,8 @@ def generate_final_combinations_mixed(n_sets=10, focus_mode=False, free_mode_rat
 
     candidates = list({tuple(c): c for c in (candidates_bal + candidates_free)}.values())
 
-    # 핫넘버 상한 규칙
-    top_hot = np.argsort(-counts)[:5] + 1
-    filtered = [c for c in candidates if len(set(c) & set(top_hot)) <= 2]
+    top_hot = np.argsort(-counts)[:HOT_K] + 1
+    filtered = [c for c in candidates if len(set(c) & set(top_hot)) <= HOT_CAP]
     candidates = filtered or candidates
 
     cand_arr = np.array(candidates)
@@ -374,9 +445,13 @@ def generate_final_combinations_mixed(n_sets=10, focus_mode=False, free_mode_rat
     v7_vals, circ_vals, morph_vals, diag_vals = evaluate_patterns_batch(candidates)
     combined_pattern = (v7_vals * 0.45 + circ_vals * 0.45 + diag_vals * 0.1)
     rand_factor = np.random.uniform(0.95, 1.05, len(eff_vals))
-    recent_pen = recent_number_penalty_dual(candidates, numbers_arr, short_n=20, long_n=50)
+    recent_pen = recent_number_penalty_dual(
+        candidates, numbers_arr,
+        short_n=20, long_n=50,
+        include_last_draw=INCLUDE_LAST
+    )
 
-    if not focus_mode:
+    if not (focus_mode or FOCUS_MODE_UI):
         total_scores = (0.65 * eff_vals + 0.35 * (combined_pattern / 50)) * rand_factor * recent_pen
     else:
         total_scores = (0.8 * eff_vals + 0.2 * (combined_pattern / 50)) * rand_factor * recent_pen
@@ -428,8 +503,7 @@ def combos_to_df(results_list, start_index=1, label="균형형"):
 if st.button("추천 번호 생성 & 분석 리포트"):
     with st.spinner("계산 중..."):
         t0 = time.time()
-        # 혼합형(균형형+비균형형), 집중형(균형 가능), 번호군 균형 제외(비균형)
-        res_mixed, _ = generate_final_combinations_mixed(10, focus_mode=False, free_mode_ratio=0.3)
+        res_mixed, _ = generate_final_combinations_mixed(10, focus_mode=False, free_mode_ratio=FREE_MODE_RATIO)
         res_focus, _ = generate_final_combinations_fast(10, focus_mode=True, ignore_group_balance=False)   # 균형형
         res_ignore_balance, _ = generate_final_combinations_fast(10, focus_mode=False, ignore_group_balance=True)  # 비균형형
         t1 = time.time()
@@ -459,13 +533,14 @@ if st.button("추천 번호 생성 & 분석 리포트"):
         df_ignore = combos_to_df(res_ignore_balance, label="번호군 균형 제외(비균형)")
         df_all = pd.concat([df_mixed, df_focus, df_ignore], ignore_index=True)
         st.subheader("📋 추천 결과 테이블")
+        st.caption("테이블 헤더를 클릭해 정렬/필터를 시도해보세요. (예: score 내림차순)")
         st.dataframe(df_all)
 
         # ----------------------------
-        # 역대 데이터 통계
+        # 역대 데이터 통계 (캐시 활용)
         # ----------------------------
         st.subheader("📊 번호별 출현 빈도")
-        counts, probs = compute_historic_freq(numbers_arr)
+        (counts, probs_hist), co_mat = historic_stats_cached(numbers_arr, csv_mtime)
         fig, ax = plt.subplots(figsize=(10, 4))
         ax.bar(np.arange(1, 46), counts, color='skyblue')
         ax.set_xlabel("번호")
@@ -474,13 +549,12 @@ if st.button("추천 번호 생성 & 분석 리포트"):
         st.pyplot(fig)
 
         st.subheader("📊 공출현 히트맵 (최근 로또 번호 기반)")
-        co_mat = cooccurrence_matrix(numbers_arr)
         fig, ax = plt.subplots(figsize=(14, 12))
         cax = ax.matshow(co_mat, cmap='Reds')
         ax.set_xticks(np.arange(45))
         ax.set_yticks(np.arange(45))
         ax.set_xticklabels(np.arange(1, 46))
         ax.set_yticklabels(np.arange(1, 46))
-        plt.setp(ax.get_xticklabels(), rotation=90)  # X축 라벨 회전
+        plt.setp(ax.get_xticklabels(), rotation=90)
         plt.colorbar(cax)
         st.pyplot(fig)
