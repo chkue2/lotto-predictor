@@ -25,12 +25,12 @@ plt.rcParams['axes.unicode_minus'] = False
 # =========================
 TRIALS = 10000                # 후보 조합 샘플 수(조합 생성용 MC)
 FOCUS_MODE_UI = False
-RANDOM_PERTURB = 0.015
+RANDOM_PERTURB = 0.003        # (2) 퍼트버이션 축소: 0.015 -> 0.003
 RECENT_PENALTY_FACTOR = 0.18
 INCLUDE_LAST = False
 FREE_MODE_RATIO = 0.30
 HOT_K = 5
-HOT_CAP = 2
+HOT_CAP = 3                   # (3) 핫넘버 허용 수 완화: 2 -> 3
 
 # --- (신규) 마르코프 기반 이중 몬테카를로 총 러닝 횟수 설정 ---
 MCS_RUNS_A = 1_000_000   # MC-A: 직전 회차 기반 전이 벡터 사용
@@ -42,6 +42,10 @@ BUCKET_TOP_K = 3
 
 # --- (A) 번호 재사용 페널티 강도 ---
 REUSE_PENALTY_WEIGHT = 0.06  # 0.04~0.08 권장
+
+# --- (4) Top-m 강제 포함 규칙 ---
+TOP_M = 8                    # 상위 m 번호 집합
+MIN_FROM_TOP_M = 2           # 각 조합에 최소 포함 개수
 
 # =========================
 # 설정 및 데이터 불러오기
@@ -213,7 +217,8 @@ def dual_monte_carlo_next_number_probs(
     counts_b = rng.multinomial(runs_b, pB)
     estB = counts_b / counts_b.sum()
 
-    p_next = 0.5 * estA + 0.5 * estB
+    # (1) A/B 결합 가중 조정: 0.75 / 0.25
+    p_next = 0.75 * estA + 0.25 * estB
     p_next = np.clip(p_next, 1e-12, None)
     p_next /= p_next.sum()
 
@@ -438,6 +443,17 @@ def recent_number_penalty_dual(
         penalties.append(penalty)
     return np.array(penalties)
 
+# -------- (4) Top-m 강제 포함 체크 --------
+def passes_topm_constraint(comb, probs, top_m=TOP_M, min_from_top=MIN_FROM_TOP_M):
+    top_idx = np.argsort(-probs)[:top_m] + 1  # 번호(1~45)
+    return (len(set(comb) & set(top_idx)) >= min_from_top)
+
+# -------- (5) 점수용 정규화 유틸 --------
+def minmax_norm(x, eps=1e-12):
+    x = np.asarray(x, dtype=float)
+    mn, mx = np.min(x), np.max(x)
+    return (x - mn) / (mx - mn + eps)
+
 # =========================
 # (A) 번호 재사용 페널티 기반 그리디 선택
 # =========================
@@ -506,7 +522,7 @@ def generate_final_combinations_fast(n_sets=10, focus_mode=False, ignore_group_b
         quota_patterns=[(2,2,2), (3,2,1), (2,3,1)]
     )
 
-    # (B) 리스트별 HOT_CAP 차등: 집중형(focus_mode=True)은 한 단계 더 엄격
+    # HOT 제한 (집중형은 한 단계 엄격)
     top_hot = np.argsort(-probs)[:HOT_K] + 1
     hot_prob_sum = probs[top_hot-1].sum()
     cap = HOT_CAP
@@ -515,26 +531,36 @@ def generate_final_combinations_fast(n_sets=10, focus_mode=False, ignore_group_b
     elif hot_prob_sum < 0.12:
         cap = min(3, HOT_CAP+1)
     if focus_mode or FOCUS_MODE_UI:
-        cap = max(1, cap-1)  # 집중형은 더 엄격
+        cap = max(1, cap-1)
 
     filtered = [c for c in candidates if len(set(c) & set(top_hot)) <= cap]
     candidates = filtered or candidates
 
+    # (4) Top-m 강제 포함 필터
+    filtered2 = [c for c in candidates if passes_topm_constraint(c, probs, TOP_M, MIN_FROM_TOP_M)]
+    candidates = filtered2 or candidates  # 전부 걸러지면 복구
+
+    # ---- (5) 점수: 효율=로그합(정규화), 패턴(정규화) 0.85/0.15 ----
     cand_arr = np.array(candidates)
-    eff_vals = probs[cand_arr - 1].sum(axis=1)
+    # 표시용 효율(기존처럼 선형합)과 점수용 효율(로그합) 분리
+    eff_linear = probs[cand_arr - 1].sum(axis=1)
+    logp = np.log(probs + 1e-12)
+    eff_log = logp[cand_arr - 1].sum(axis=1)  # 점수용
+    eff_log_n = minmax_norm(eff_log)
+
     v7_vals, circ_vals, morph_vals, diag_vals = evaluate_patterns_batch(candidates)
     combined_pattern = (v7_vals*0.42 + circ_vals*0.42 + diag_vals*0.11 + (morph_vals/20.0)*0.05)
-    rand_factor = rng.uniform(0.95, 1.05, len(eff_vals))
+    pat_n = minmax_norm(combined_pattern)
+
     recent_pen = recent_number_penalty_dual(
         candidates, numbers_arr,
         short_n=20, long_n=50,
         include_last_draw=INCLUDE_LAST
     )
+    rand_factor = rng.uniform(0.95, 1.05, len(eff_log_n))
 
-    if not (focus_mode or FOCUS_MODE_UI):
-        base_score = (0.65 * eff_vals + 0.35 * (combined_pattern / 50))
-    else:
-        base_score = (0.8 * eff_vals + 0.2 * (combined_pattern / 50))
+    # 가중치: 0.85 * 효율(로그합) + 0.15 * 패턴
+    base_score = 0.85 * eff_log_n + 0.15 * pat_n
     total_scores = base_score * rand_factor * recent_pen
 
     # (A) 번호 재사용 페널티를 반영한 그리디 선발
@@ -545,7 +571,7 @@ def generate_final_combinations_fast(n_sets=10, focus_mode=False, ignore_group_b
         c = sorted(candidates[idx])
         final_results.append((
             c,
-            float(eff_vals[idx]),
+            float(eff_linear[idx]),          # 표시는 선형합(기존 "효율" 의미 유지)
             float(v7_vals[idx]),
             float(circ_vals[idx]),
             float(morph_vals[idx]),
@@ -597,7 +623,7 @@ def generate_final_combinations_mixed(n_sets=10, focus_mode=False, free_mode_rat
     )
     candidates = list({tuple(c): c for c in (candidates_bal + candidates_free)}.values())
 
-    # (B) 혼합형은 기본 탄력 캡 유지(집중형만 추가로 강화)
+    # 혼합형 핫넘버 캡
     top_hot = np.argsort(-probs)[:HOT_K] + 1
     hot_prob_sum = probs[top_hot-1].sum()
     cap = HOT_CAP
@@ -609,18 +635,29 @@ def generate_final_combinations_mixed(n_sets=10, focus_mode=False, free_mode_rat
     filtered = [c for c in candidates if len(set(c) & set(top_hot)) <= cap]
     candidates = filtered or candidates
 
+    # (4) Top-m 강제 포함
+    filtered2 = [c for c in candidates if passes_topm_constraint(c, probs, TOP_M, MIN_FROM_TOP_M)]
+    candidates = filtered2 or candidates
+
+    # ---- (5) 점수: 효율=로그합(정규화), 패턴(정규화) 0.85/0.15 ----
     cand_arr = np.array(candidates)
-    eff_vals = probs[cand_arr - 1].sum(axis=1)
+    eff_linear = probs[cand_arr - 1].sum(axis=1)
+    logp = np.log(probs + 1e-12)
+    eff_log = logp[cand_arr - 1].sum(axis=1)
+    eff_log_n = minmax_norm(eff_log)
+
     v7_vals, circ_vals, morph_vals, diag_vals = evaluate_patterns_batch(candidates)
     combined_pattern = (v7_vals*0.42 + circ_vals*0.42 + diag_vals*0.11 + (morph_vals/20.0)*0.05)
-    rand_factor = rng.uniform(0.95, 1.05, len(eff_vals))
+    pat_n = minmax_norm(combined_pattern)
+
     recent_pen = recent_number_penalty_dual(
         candidates, numbers_arr,
         short_n=20, long_n=50,
         include_last_draw=INCLUDE_LAST
     )
+    rand_factor = rng.uniform(0.95, 1.05, len(eff_log_n))
 
-    base_score = (0.65 * eff_vals + 0.35 * (combined_pattern / 50))
+    base_score = 0.85 * eff_log_n + 0.15 * pat_n
     total_scores = base_score * rand_factor * recent_pen
 
     # (A) 번호 재사용 페널티 기반 그리디 선발
@@ -631,7 +668,7 @@ def generate_final_combinations_mixed(n_sets=10, focus_mode=False, free_mode_rat
         c = sorted(candidates[idx])
         final_results.append((
             c,
-            float(eff_vals[idx]),
+            float(eff_linear[idx]),          # 표시는 선형합
             float(v7_vals[idx]),
             float(circ_vals[idx]),
             float(morph_vals[idx]),
