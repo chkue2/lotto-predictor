@@ -55,10 +55,7 @@ st.title("🎯 통합 로또 추천기 V14")
 
 CSV_FILE = "lotto_data.csv"
 
-# 세션 난수(재현성)
-if "rng" not in st.session_state:
-    st.session_state.rng = np.random.default_rng(20251202)
-rng = st.session_state.rng
+rng = np.random.default_rng()
 
 @st.cache_data
 def load_lotto_data_cached(file_path):
