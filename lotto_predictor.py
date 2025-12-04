@@ -8,6 +8,7 @@ import matplotlib.pyplot as plt
 from matplotlib import rc
 import platform
 from concurrent.futures import ThreadPoolExecutor
+from pattern_sets import PATTERN_SETS
 
 # =========================
 # 한글 폰트 설정
@@ -23,29 +24,23 @@ plt.rcParams['axes.unicode_minus'] = False
 # =========================
 # 고정 파라미터 (슬라이더 제거 후 고정값)
 # =========================
-TRIALS = 10000                # 후보 조합 샘플 수(조합 생성용 MC)
+TRIALS = 10000
 FOCUS_MODE_UI = False
-RANDOM_PERTURB = 0.003        # (2) 퍼트버이션 축소: 0.015 -> 0.003
+RANDOM_PERTURB = 0.003
 RECENT_PENALTY_FACTOR = 0.18
 INCLUDE_LAST = False
 FREE_MODE_RATIO = 0.30
 HOT_K = 5
-HOT_CAP = 3                   # (3) 핫넘버 허용 수 완화: 2 -> 3
+HOT_CAP = 3
 
-# --- (신규) 마르코프 기반 이중 몬테카를로 총 러닝 횟수 설정 ---
-MCS_RUNS_A = 1_000_000   # MC-A: 직전 회차 기반 전이 벡터 사용
-MCS_RUNS_B = 1_000_000   # MC-B: 전 구간 전이행렬 + 번호빈도 혼합
+MCS_RUNS_A = 1_000_000
+MCS_RUNS_B = 1_000_000
 
-# 포트폴리오/패턴 다양성 관련(기존 유지)
 PORTFOLIO_BLEND = 0.15
 BUCKET_TOP_K = 3
-
-# --- (A) 번호 재사용 페널티 강도 ---
-REUSE_PENALTY_WEIGHT = 0.06  # 0.04~0.08 권장
-
-# --- (4) Top-m 강제 포함 규칙 ---
-TOP_M = 8                    # 상위 m 번호 집합
-MIN_FROM_TOP_M = 2           # 각 조합에 최소 포함 개수
+REUSE_PENALTY_WEIGHT = 0.06
+TOP_M = 8
+MIN_FROM_TOP_M = 2
 
 # =========================
 # 설정 및 데이터 불러오기
@@ -54,20 +49,24 @@ st.set_page_config(page_title="통합 로또 추천기 V14", layout="centered")
 st.title("🎯 통합 로또 추천기 V14")
 
 CSV_FILE = "lotto_data.csv"
-
 rng = np.random.default_rng()
 
 @st.cache_data
-def load_lotto_data_cached(file_path):
+def load_lotto_data_cached(file_path, mtime):
     df = pd.read_csv(file_path)
+    if '회차' in df.columns:
+        df = df.rename(columns={'회차': 'round'})
+    df['round'] = pd.to_numeric(df['round'], errors='coerce')
+    for i in range(1, 7):
+        df[f'번호{i}'] = pd.to_numeric(df.get(f'번호{i}'), errors='coerce')
+    if '보너스번호' in df.columns:
+        df['보너스번호'] = pd.to_numeric(df['보너스번호'], errors='coerce')
+    df = df.dropna(subset=['round']).sort_values('round').reset_index(drop=True)
     df['numbers'] = df[[f"번호{i}" for i in range(1,7)]].values.tolist()
     return df
 
 @st.cache_data
 def build_transition_matrix_cached(numbers_arr, mtime):
-    """
-    전 구간 전이행렬 T(45x45)과 번호별 출현 빈도 freq.
-    """
     n = 45
     m = np.zeros((n, n), dtype=float)
     freq = np.zeros(n, dtype=float)
@@ -99,10 +98,9 @@ def historic_stats_cached(numbers_arr, mtime):
 def get_file_mtime(file_path):
     return os.path.getmtime(file_path)
 
-# CSV 로드(예외 처리)
 try:
     csv_mtime = get_file_mtime(CSV_FILE)
-    df = load_lotto_data_cached(CSV_FILE)
+    df = load_lotto_data_cached(CSV_FILE, csv_mtime)
 except FileNotFoundError:
     st.error(f"CSV 파일을 찾을 수 없습니다: {CSV_FILE}")
     st.stop()
@@ -214,7 +212,6 @@ def dual_monte_carlo_next_number_probs(
     counts_b = rng.multinomial(runs_b, pB)
     estB = counts_b / counts_b.sum()
 
-    # (1) A/B 결합 가중 조정: 0.75 / 0.25
     p_next = 0.75 * estA + 0.25 * estB
     p_next = np.clip(p_next, 1e-12, None)
     p_next /= p_next.sum()
@@ -455,10 +452,6 @@ def minmax_norm(x, eps=1e-12):
 # (A) 번호 재사용 페널티 기반 그리디 선택
 # =========================
 def select_with_reuse_penalty(candidates, base_scores, n_sets):
-    """
-    이미 선택된 조합에 많이 등장한 번호를 포함할수록 불리하도록
-    순차적으로 점수를 조정해가며 선택합니다.
-    """
     selected_idx = []
     used_counts = np.zeros(46, dtype=int)  # 1~45
     remaining = set(range(len(candidates)))
@@ -468,7 +461,6 @@ def select_with_reuse_penalty(candidates, base_scores, n_sets):
         best_score = -1.0
         for i in list(remaining):
             comb = candidates[i]
-            # 재사용 페널티 = 1 / (1 + w * Σ used_counts[num])
             reuse = sum(used_counts[n] for n in comb)
             penalty = 1.0 / (1.0 + REUSE_PENALTY_WEIGHT * reuse)
             score_adj = base_scores[i] * penalty
@@ -477,7 +469,6 @@ def select_with_reuse_penalty(candidates, base_scores, n_sets):
                 best_idx = i
         if best_idx is None:
             break
-        # 선택 및 카운트 업데이트
         selected_idx.append(best_idx)
         for n in candidates[best_idx]:
             used_counts[n] += 1
@@ -491,7 +482,6 @@ def select_with_reuse_penalty(candidates, base_scores, n_sets):
 def generate_final_combinations_fast(n_sets=10, focus_mode=False, ignore_group_balance=True):
     T, freq = build_transition_matrix_cached(numbers_arr, csv_mtime)
 
-    # 다음 회차 번호 확률
     next_probs, mc_parts, transition_vectors = dual_monte_carlo_next_number_probs(
         numbers_arr, T, freq,
         runs_a=MCS_RUNS_A, runs_b=MCS_RUNS_B,
@@ -519,7 +509,6 @@ def generate_final_combinations_fast(n_sets=10, focus_mode=False, ignore_group_b
         quota_patterns=[(2,2,2), (3,2,1), (2,3,1)]
     )
 
-    # HOT 제한 (집중형은 한 단계 엄격)
     top_hot = np.argsort(-probs)[:HOT_K] + 1
     hot_prob_sum = probs[top_hot-1].sum()
     cap = HOT_CAP
@@ -533,16 +522,13 @@ def generate_final_combinations_fast(n_sets=10, focus_mode=False, ignore_group_b
     filtered = [c for c in candidates if len(set(c) & set(top_hot)) <= cap]
     candidates = filtered or candidates
 
-    # (4) Top-m 강제 포함 필터
     filtered2 = [c for c in candidates if passes_topm_constraint(c, probs, TOP_M, MIN_FROM_TOP_M)]
-    candidates = filtered2 or candidates  # 전부 걸러지면 복구
+    candidates = filtered2 or candidates
 
-    # ---- (5) 점수: 효율=로그합(정규화), 패턴(정규화) 0.85/0.15 ----
     cand_arr = np.array(candidates)
-    # 표시용 효율(기존처럼 선형합)과 점수용 효율(로그합) 분리
     eff_linear = probs[cand_arr - 1].sum(axis=1)
     logp = np.log(probs + 1e-12)
-    eff_log = logp[cand_arr - 1].sum(axis=1)  # 점수용
+    eff_log = logp[cand_arr - 1].sum(axis=1)
     eff_log_n = minmax_norm(eff_log)
 
     v7_vals, circ_vals, morph_vals, diag_vals = evaluate_patterns_batch(candidates)
@@ -556,11 +542,9 @@ def generate_final_combinations_fast(n_sets=10, focus_mode=False, ignore_group_b
     )
     rand_factor = rng.uniform(0.95, 1.05, len(eff_log_n))
 
-    # 가중치: 0.85 * 효율(로그합) + 0.15 * 패턴
     base_score = 0.85 * eff_log_n + 0.15 * pat_n
     total_scores = base_score * rand_factor * recent_pen
 
-    # (A) 번호 재사용 페널티를 반영한 그리디 선발
     final_sel = select_with_reuse_penalty(candidates, total_scores, n_sets)
 
     final_results = []
@@ -568,14 +552,14 @@ def generate_final_combinations_fast(n_sets=10, focus_mode=False, ignore_group_b
         c = sorted(candidates[idx])
         final_results.append((
             c,
-            float(eff_linear[idx]),          # 표시는 선형합(기존 "효율" 의미 유지)
+            float(eff_linear[idx]),
             float(v7_vals[idx]),
             float(circ_vals[idx]),
             float(morph_vals[idx]),
             float(combined_pattern[idx]),
             float(total_scores[idx])
         ))
-    return final_results, probs  # probs = 다음 회차 번호 확률
+    return final_results, probs
 
 # =========================
 # 6️⃣ 혼합형 생성 (균형형 + 비균형형 혼합)
@@ -620,7 +604,6 @@ def generate_final_combinations_mixed(n_sets=10, focus_mode=False, free_mode_rat
     )
     candidates = list({tuple(c): c for c in (candidates_bal + candidates_free)}.values())
 
-    # 혼합형 핫넘버 캡
     top_hot = np.argsort(-probs)[:HOT_K] + 1
     hot_prob_sum = probs[top_hot-1].sum()
     cap = HOT_CAP
@@ -632,11 +615,9 @@ def generate_final_combinations_mixed(n_sets=10, focus_mode=False, free_mode_rat
     filtered = [c for c in candidates if len(set(c) & set(top_hot)) <= cap]
     candidates = filtered or candidates
 
-    # (4) Top-m 강제 포함
     filtered2 = [c for c in candidates if passes_topm_constraint(c, probs, TOP_M, MIN_FROM_TOP_M)]
     candidates = filtered2 or candidates
 
-    # ---- (5) 점수: 효율=로그합(정규화), 패턴(정규화) 0.85/0.15 ----
     cand_arr = np.array(candidates)
     eff_linear = probs[cand_arr - 1].sum(axis=1)
     logp = np.log(probs + 1e-12)
@@ -657,7 +638,6 @@ def generate_final_combinations_mixed(n_sets=10, focus_mode=False, free_mode_rat
     base_score = 0.85 * eff_log_n + 0.15 * pat_n
     total_scores = base_score * rand_factor * recent_pen
 
-    # (A) 번호 재사용 페널티 기반 그리디 선발
     final_sel = select_with_reuse_penalty(candidates, total_scores, n_sets)
 
     final_results = []
@@ -665,7 +645,7 @@ def generate_final_combinations_mixed(n_sets=10, focus_mode=False, free_mode_rat
         c = sorted(candidates[idx])
         final_results.append((
             c,
-            float(eff_linear[idx]),          # 표시는 선형합
+            float(eff_linear[idx]),
             float(v7_vals[idx]),
             float(circ_vals[idx]),
             float(morph_vals[idx]),
@@ -699,6 +679,141 @@ def combos_to_df(results_list, start_index=1, label="균형형"):
             "v7": v7, "circ": circ, "morph": morph, "pat": pat_comb, "score": score
         })
     return pd.DataFrame(rows)
+
+# =========================
+# 9️⃣ PATTERN_SETS 기반 최근 2단계 전이 영향 → 1200회에 적용해 1201회 예측 (★ 변경)
+# =========================
+from collections import Counter
+
+def build_group_maps(PATTERN_SETS):
+    group_maps = {}
+    groups_by_set = {}
+    for sid, groups in PATTERN_SETS.items():
+        num2grp = {}
+        for gi, triplet in enumerate(groups):
+            for n in triplet:
+                num2grp[n] = gi
+        group_maps[sid] = num2grp
+        groups_by_set[sid] = groups
+    return group_maps, groups_by_set
+
+def pattern_signature(draw_numbers, num2grp_map):
+    return [num2grp_map[n] for n in draw_numbers]
+
+def one_hot_group_counts(sig):
+    v = np.zeros(15, dtype=float)
+    for g in sig:
+        v[g] += 1.0
+    return v
+
+def recent_pairwise_transition_predict(
+    numbers_arr,
+    PATTERN_SETS,
+    penalty_last_draw=0.75,
+    n_sets=10
+):
+    """
+    최근 3회: D1(=t-2), D2(=t-1), D3(=t)
+    전이: D1→D2, D2→D3 의 그룹 전이 행렬을 합산하여
+    D3의 그룹 존재벡터에 곱해 D4(=t+1) 그룹 점수를 추정.
+    이후 그룹 점수를 번호 확률로 분배하여 6개 조합 10개 샘플링.
+    """
+    assert len(numbers_arr) >= 3, "최소 3회의 데이터가 필요합니다."
+    D1, D2, D3 = numbers_arr[-3], numbers_arr[-2], numbers_arr[-1]
+
+    group_maps, groups_by_set = build_group_maps(PATTERN_SETS)
+
+    # 패턴셋별 그룹 전이 행렬(15x15) 구성
+    # T_recent = Σ ( outer(one_hot(D_{i}), one_hot(D_{i+1})) )  for i in {t-2, t-1}
+    # 그리고 현재 회차 D3의 그룹 벡터를 v3라 하면, next_group_score = T_recent^T @ v3
+    total_group_scores = np.zeros(15, dtype=float)
+
+    for sid, num2grp in group_maps.items():
+        sig1 = pattern_signature(D1, num2grp)
+        sig2 = pattern_signature(D2, num2grp)
+        sig3 = pattern_signature(D3, num2grp)
+
+        v1 = one_hot_group_counts(sig1)  # (15,)
+        v2 = one_hot_group_counts(sig2)
+        v3 = one_hot_group_counts(sig3)
+
+        T12 = np.outer(v1, v2)  # 15x15
+        T23 = np.outer(v2, v3)  # 15x15
+        T_recent = T12 + T23
+
+        # 다음 회차 그룹 점수
+        next_g = T_recent.T @ v3  # (15,)
+        total_group_scores += next_g
+
+    # 그룹 점수를 번호(1~45)에 분배
+    number_scores = np.zeros(46, dtype=float)
+    for sid, groups in groups_by_set.items():
+        # 각 패턴셋의 그룹 점수를 그대로 가산(동일 그룹 인덱스끼리 매칭)
+        for gi, triplet in enumerate(groups):
+            g_score = total_group_scores[gi] / 3.0
+            for n in triplet:
+                number_scores[n] += g_score
+
+    # 직전 회차(D3) 번호에 약한 패널티
+    for n in D3:
+        number_scores[n] *= penalty_last_draw
+
+    # 정규화하여 확률 벡터로
+    p = number_scores[1:].copy()
+    p = np.clip(p, 1e-12, None)
+    p /= p.sum()
+    probs = np.zeros(46, dtype=float)
+    probs[1:] = p  # 1~45
+
+    # ---- 이 확률로 6개 조합 10개 샘플링 (내부 필터 재활용) ----
+    def sample_combos_from_probs(probs, want=10, max_attempts=5000):
+        selected = []
+        seen = set()
+        attempts = 0
+        base_idx = np.arange(1, 46)
+        while len(selected) < want and attempts < max_attempts:
+            attempts += 1
+            # 확률 기반 비복원 6개 샘플
+            comb = rng.choice(base_idx, size=6, replace=False, p=probs[1:])
+            comb = sorted(comb.tolist())
+
+            t = tuple(comb)
+            if t in seen:
+                continue
+            # 필터
+            if not check_consecutive_rule(comb):
+                continue
+            if is_strict_diagonal(comb) and rng.random() >= 0.1:
+                continue
+            if morphological_pattern_score(comb) == 0:
+                continue
+
+            seen.add(t)
+            selected.append(comb)
+        return selected
+
+    combos = sample_combos_from_probs(probs, want=n_sets)
+
+    # 점수 출력용(선형 효율 등은 내부 확률로 대체)
+    effs = [float(probs[np.array(c)]) if False else float(np.sum(probs[np.array(c)])) for c in combos]
+    # 패턴 점수 계산(표시용)
+    v7_vals, circ_vals, morph_vals, diag_vals = evaluate_patterns_batch(combos)
+    pat_comb_vals = (v7_vals*0.42 + circ_vals*0.42 + diag_vals*0.11 + (morph_vals/20.0)*0.05)
+    total_scores = pat_comb_vals  # 표시용 간단 처리
+
+    results = []
+    for i, c in enumerate(combos):
+        results.append((
+            c,
+            float(effs[i]),
+            float(v7_vals[i]),
+            float(circ_vals[i]),
+            float(morph_vals[i]),
+            float(pat_comb_vals[i]),
+            float(total_scores[i])
+        ))
+    # probs 반환(길이 45로 사용하기 좋게)
+    return results, probs[1:], (D1, D2, D3)
 
 # =========================
 # 8️⃣ Streamlit UI
@@ -772,3 +887,40 @@ if st.button("추천 번호 생성 & 분석 리포트"):
         plt.setp(ax.get_xticklabels(), rotation=90)
         plt.colorbar(cax)
         st.pyplot(fig)
+
+        # ----------------------------
+        # 🧩 PATTERN_SETS 기반 2단계 전이 적용 예측 (★ 변경)
+        # ----------------------------
+        st.subheader("🧩 패턴셋 기반: (t-2→t-1, t-1→t 전이) 를 t에 적용해 t+1 예측 10조합")
+
+        pattern_combo_res, pattern_probs, (D1, D2, D3) = recent_pairwise_transition_predict(
+            numbers_arr,
+            PATTERN_SETS,
+            penalty_last_draw=0.75,
+            n_sets=10
+        )
+
+        # 최근 3회 회차 번호 표시
+        if 'round' in df.columns:
+            recent_rounds = df['round'].iloc[-3:].astype('Int64').tolist()
+        else:
+            recent_rounds = [None, None, None]
+
+        st.markdown("**최근 3회차 실제 번호 (오래된 순→최신)**")
+        for r, draw in zip(recent_rounds, [D1, D2, D3]):
+            if r is not None:
+                st.write(f"{r}회차: {sorted(list(map(int, draw)))}")
+            else:
+                st.write(f"{sorted(list(map(int, draw)))}")
+
+        st.markdown("**전이 기반 예측 10조합 (PATTERN_SETS 사용)**")
+        for c, eff, v7, circ, morph, patc, sc in pattern_combo_res:
+            st.write(f"{c} | 효율:{eff:.4f} | V7:{v7:.1f} | 원형:{circ:.1f} | 형태학:{morph:.1f} | 통합:{patc:.1f}")
+
+        # 번호별 확률 바차트 (패턴 전이 기반)
+        st.subheader("📈 패턴 전이 기반 번호 확률")
+        fig2, ax2 = plt.subplots(figsize=(10, 3.6))
+        ax2.bar(np.arange(1, 46), pattern_probs)
+        ax2.set_xlabel("번호"); ax2.set_ylabel("확률")
+        ax2.set_title("패턴 전이 기반 다음 회차 번호 확률(정규화)")
+        st.pyplot(fig2)
