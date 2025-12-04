@@ -840,6 +840,16 @@ if st.button("추천 번호 생성 & 분석 리포트"):
         st.subheader("🌟 번호군 균형 제외 추천 10조합 (비균형형)")
         for _, (comb, eff, v7, circ, morph, pat_comb, score) in enumerate(res_ignore, 1):
             st.write(f"{comb} | 효율:{eff:.4f} | V7:{v7:.1f} | 원형:{circ:.1f} | 형태학:{morph:.1f} | 통합:{pat_comb:.1f} | 점수:{score:.4f}")
+            
+        st.subheader("🧩 패턴셋 기반: (t-2→t-1, t-1→t 전이) 를 t에 적용해 t+1 예측 10조합")
+        pattern_combo_res, pattern_probs, (D1, D2, D3) = recent_pairwise_transition_predict(
+            numbers_arr,
+            PATTERN_SETS,
+            penalty_last_draw=0.75,
+            n_sets=10
+        )
+        for c, eff, v7, circ, morph, patc, sc in pattern_combo_res:
+            st.write(f"{c} | 효율:{eff:.4f} | V7:{v7:.1f} | 원형:{circ:.1f} | 형태학:{morph:.1f} | 통합:{patc:.1f}")
 
         st.write(f"계산 소요 시간: {t1 - t0:.2f}초")
 
@@ -887,35 +897,6 @@ if st.button("추천 번호 생성 & 분석 리포트"):
         plt.setp(ax.get_xticklabels(), rotation=90)
         plt.colorbar(cax)
         st.pyplot(fig)
-
-        # ----------------------------
-        # 🧩 PATTERN_SETS 기반 2단계 전이 적용 예측 (★ 변경)
-        # ----------------------------
-        st.subheader("🧩 패턴셋 기반: (t-2→t-1, t-1→t 전이) 를 t에 적용해 t+1 예측 10조합")
-
-        pattern_combo_res, pattern_probs, (D1, D2, D3) = recent_pairwise_transition_predict(
-            numbers_arr,
-            PATTERN_SETS,
-            penalty_last_draw=0.75,
-            n_sets=10
-        )
-
-        # 최근 3회 회차 번호 표시
-        if 'round' in df.columns:
-            recent_rounds = df['round'].iloc[-3:].astype('Int64').tolist()
-        else:
-            recent_rounds = [None, None, None]
-
-        st.markdown("**최근 3회차 실제 번호 (오래된 순→최신)**")
-        for r, draw in zip(recent_rounds, [D1, D2, D3]):
-            if r is not None:
-                st.write(f"{r}회차: {sorted(list(map(int, draw)))}")
-            else:
-                st.write(f"{sorted(list(map(int, draw)))}")
-
-        st.markdown("**전이 기반 예측 10조합 (PATTERN_SETS 사용)**")
-        for c, eff, v7, circ, morph, patc, sc in pattern_combo_res:
-            st.write(f"{c} | 효율:{eff:.4f} | V7:{v7:.1f} | 원형:{circ:.1f} | 형태학:{morph:.1f} | 통합:{patc:.1f}")
 
         # 번호별 확률 바차트 (패턴 전이 기반)
         st.subheader("📈 패턴 전이 기반 번호 확률")
