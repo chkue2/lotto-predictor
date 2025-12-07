@@ -709,12 +709,12 @@ def one_hot_group_counts(sig):
 def recent_pairwise_transition_predict(
     numbers_arr,
     PATTERN_SETS,
-    penalty_last_draw=0.75,
+    penalty_last_draw=0.55,
     n_sets=10
 ):
     """
     최근 3회: D1(=t-2), D2(=t-1), D3(=t)
-    전이: D1→D2, D2→D3 의 그룹 전이 행렬을 합산하여
+    전이: D1→D2, D2→D3 의 그룹 전이 행렬을 합산(가중)하여
     D3의 그룹 존재벡터에 곱해 D4(=t+1) 그룹 점수를 추정.
     이후 그룹 점수를 번호 확률로 분배하여 6개 조합 10개 샘플링.
     """
@@ -723,9 +723,11 @@ def recent_pairwise_transition_predict(
 
     group_maps, groups_by_set = build_group_maps(PATTERN_SETS)
 
+    # --- (추가) 그룹 내 번호 가중용: 역사적 빈도 ---
+    hist_counts, _ = compute_historic_freq(numbers_arr)
+    hist_counts = hist_counts.astype(float)
+
     # 패턴셋별 그룹 전이 행렬(15x15) 구성
-    # T_recent = Σ ( outer(one_hot(D_{i}), one_hot(D_{i+1})) )  for i in {t-2, t-1}
-    # 그리고 현재 회차 D3의 그룹 벡터를 v3라 하면, next_group_score = T_recent^T @ v3
     total_group_scores = np.zeros(15, dtype=float)
 
     for sid, num2grp in group_maps.items():
@@ -739,22 +741,26 @@ def recent_pairwise_transition_predict(
 
         T12 = np.outer(v1, v2)  # 15x15
         T23 = np.outer(v2, v3)  # 15x15
-        T_recent = T12 + T23
+        # --- (변경) 전이 가중치 분리 ---
+        T_recent = 0.65 * T12 + 0.35 * T23
 
         # 다음 회차 그룹 점수
         next_g = T_recent.T @ v3  # (15,)
         total_group_scores += next_g
 
-    # 그룹 점수를 번호(1~45)에 분배
+    # --- (변경) 그룹 점수의 번호 분배: 균등(1/3) → 과거 빈도 가중 분배 ---
+    # 각 그룹 triplet 내에서 역사적 빈도(hist_counts)에 따라 가중 분배
     number_scores = np.zeros(46, dtype=float)
+    eps = 1e-3
     for sid, groups in groups_by_set.items():
-        # 각 패턴셋의 그룹 점수를 그대로 가산(동일 그룹 인덱스끼리 매칭)
         for gi, triplet in enumerate(groups):
-            g_score = total_group_scores[gi] / 3.0
-            for n in triplet:
-                number_scores[n] += g_score
+            g_score = total_group_scores[gi]
+            weights = np.array([hist_counts[n-1] for n in triplet], dtype=float) + eps
+            weights /= weights.sum()
+            for n, w in zip(triplet, weights):
+                number_scores[n] += g_score * w
 
-    # 직전 회차(D3) 번호에 약한 패널티
+    # 직전 회차(D3) 번호에 패널티
     for n in D3:
         number_scores[n] *= penalty_last_draw
 
@@ -773,14 +779,12 @@ def recent_pairwise_transition_predict(
         base_idx = np.arange(1, 46)
         while len(selected) < want and attempts < max_attempts:
             attempts += 1
-            # 확률 기반 비복원 6개 샘플
             comb = rng.choice(base_idx, size=6, replace=False, p=probs[1:])
             comb = sorted(comb.tolist())
 
             t = tuple(comb)
             if t in seen:
                 continue
-            # 필터
             if not check_consecutive_rule(comb):
                 continue
             if is_strict_diagonal(comb) and rng.random() >= 0.1:
@@ -795,8 +799,7 @@ def recent_pairwise_transition_predict(
     combos = sample_combos_from_probs(probs, want=n_sets)
 
     # 점수 출력용(선형 효율 등은 내부 확률로 대체)
-    effs = [float(probs[np.array(c)]) if False else float(np.sum(probs[np.array(c)])) for c in combos]
-    # 패턴 점수 계산(표시용)
+    effs = [float(np.sum(probs[np.array(c)])) for c in combos]
     v7_vals, circ_vals, morph_vals, diag_vals = evaluate_patterns_batch(combos)
     pat_comb_vals = (v7_vals*0.42 + circ_vals*0.42 + diag_vals*0.11 + (morph_vals/20.0)*0.05)
     total_scores = pat_comb_vals  # 표시용 간단 처리
@@ -812,7 +815,6 @@ def recent_pairwise_transition_predict(
             float(pat_comb_vals[i]),
             float(total_scores[i])
         ))
-    # probs 반환(길이 45로 사용하기 좋게)
     return results, probs[1:], (D1, D2, D3)
 
 # =========================
@@ -840,12 +842,12 @@ if st.button("추천 번호 생성 & 분석 리포트"):
         st.subheader("🌟 번호군 균형 제외 추천 10조합 (비균형형)")
         for _, (comb, eff, v7, circ, morph, pat_comb, score) in enumerate(res_ignore, 1):
             st.write(f"{comb} | 효율:{eff:.4f} | V7:{v7:.1f} | 원형:{circ:.1f} | 형태학:{morph:.1f} | 통합:{pat_comb:.1f} | 점수:{score:.4f}")
-            
+
         st.subheader("🧩 패턴셋 기반: (t-2→t-1, t-1→t 전이) 를 t에 적용해 t+1 예측 10조합")
         pattern_combo_res, pattern_probs, (D1, D2, D3) = recent_pairwise_transition_predict(
             numbers_arr,
             PATTERN_SETS,
-            penalty_last_draw=0.75,
+            penalty_last_draw=0.55,
             n_sets=10
         )
         for c, eff, v7, circ, morph, patc, sc in pattern_combo_res:
